@@ -102,13 +102,19 @@ export class ActivePathEffect {
             // 방향 설정 (Y축에서 direction으로 회전)
             if (height > 0.001) {
                 const yAxis = BABYLON.Vector3.Up();
-                const axis = BABYLON.Vector3.Cross(yAxis, direction.normalize());
-                const angle = Math.acos(BABYLON.Vector3.Dot(yAxis, direction.normalize()));
+                const dirNorm = direction.normalize();
+                const axis = BABYLON.Vector3.Cross(yAxis, dirNorm);
+                // Math.acos의 입력을 -1~1로 클램프 (부동소수점 오차 방지)
+                const dot = Math.max(-1, Math.min(1, BABYLON.Vector3.Dot(yAxis, dirNorm)));
+                const angle = Math.acos(dot);
                 if (axis.length() > 0.001) {
                     seg.rotationQuaternion = BABYLON.Quaternion.RotationAxis(axis.normalize(), angle);
                 }
             }
-            
+
+            // [FIX] World Matrix 강제 업데이트 - 렌더링 전에 position/rotation 반영
+            seg.computeWorldMatrix(true);
+
             seg.isPickable = false;
             seg.material = this.segMat!;
             seg.alwaysSelectAsActiveMesh = true;
@@ -271,6 +277,8 @@ export class ActivePathEffect {
                 this.scene
             );
             marker.position.copyFrom(this.pathPoints[i]);
+            // [FIX] World Matrix 강제 업데이트
+            marker.computeWorldMatrix(true);
             marker.material = this.debugMat;
             marker.isPickable = false;
             marker.alwaysSelectAsActiveMesh = true;
