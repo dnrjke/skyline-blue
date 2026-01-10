@@ -124,17 +124,23 @@ export class RenderingPipelineTest {
         console.log(`Total Materials: ${this.scene.materials.length}`);
         console.log(`Rendering Groups Used: ${this.getUsedRenderingGroups().join(', ')}`);
 
-        // Glow layers
-        const glowLayers = this.scene.effectLayers?.filter(l => l.getClassName() === 'GlowLayer') ?? [];
-        console.log(`Glow Layers: ${glowLayers.length}`);
+        // Active meshes check (what Babylon actually renders this frame)
+        const activeMeshes = this.scene.getActiveMeshes();
+        console.log(`Active Meshes Count: ${activeMeshes.length}`);
 
-        // Active path segments
+        // Path segments
         const pathSegs = this.scene.meshes.filter(m => m.name.startsWith('ArcanaActivePathSeg'));
-        console.log(`Path Segments: ${pathSegs.length}`);
+        const activePathSegs = pathSegs.filter(m => activeMeshes.data.includes(m));
+        console.log(`Path Segments: ${pathSegs.length} total, ${activePathSegs.length} in active meshes`);
 
         // Debug markers
         const debugMarkers = this.scene.meshes.filter(m => m.name.startsWith('DebugPathPoint'));
-        console.log(`Debug Markers: ${debugMarkers.length}`);
+        const activeDebugMarkers = debugMarkers.filter(m => activeMeshes.data.includes(m));
+        console.log(`Debug Markers: ${debugMarkers.length} total, ${activeDebugMarkers.length} in active meshes`);
+
+        // Glow layers
+        const glowLayers = this.scene.effectLayers?.filter(l => l.getClassName() === 'GlowLayer') ?? [];
+        console.log(`Glow Layers: ${glowLayers.length}`);
 
         // Camera details
         if (this.scene.activeCamera) {
@@ -142,6 +148,9 @@ export class RenderingPipelineTest {
             console.log(`Camera Position: (${cam.position.x.toFixed(2)}, ${cam.position.y.toFixed(2)}, ${cam.position.z.toFixed(2)})`);
             console.log(`Camera Layer Mask: ${cam.layerMask}`);
         }
+
+        // Check for frozen active meshes
+        console.log(`Scene freezeActiveMeshes: ${(this.scene as any)._activeMeshesFrozen ?? false}`);
 
         console.log('=== END DIAGNOSTIC ===');
     }
