@@ -50,14 +50,17 @@ export class ActivePathEffect {
      * - mesh 생성/갱신은 여기서만 수행
      */
     private setupRenderLoopHandler(): void {
+        console.log('[ActivePathEffect] Setting up render loop handler');
         this.renderObserver = this.scene.onBeforeRenderObservable.add(() => {
+            // [DEBUG] 매 프레임 체크 (성능상 실제 배포 시 제거)
             if (this.pendingPath) {
                 const { points, options } = this.pendingPath;
                 this.pendingPath = null;
-                console.log('[ActivePathEffect] Processing pending path in render loop');
+                console.log('[ActivePathEffect] Processing pending path in render loop:', points.length, 'points');
                 this.buildPathMeshes(points, options);
             }
         });
+        console.log('[ActivePathEffect] Render observer registered:', !!this.renderObserver);
     }
 
     /**
@@ -317,7 +320,10 @@ export class ActivePathEffect {
     }
 
     private disposeMeshes(): void {
-        this.pendingPath = null; // [FIX] pending도 정리
+        if (this.pendingPath) {
+            console.log('[ActivePathEffect] disposeMeshes clearing pendingPath');
+        }
+        this.pendingPath = null;
 
         if (this.particles) {
             this.particles.stop();
@@ -339,6 +345,7 @@ export class ActivePathEffect {
     }
 
     dispose(): void {
+        console.log('[ActivePathEffect] dispose() called - removing render observer');
         if (this.renderObserver) {
             this.scene.onBeforeRenderObservable.remove(this.renderObserver);
             this.renderObserver = null;
