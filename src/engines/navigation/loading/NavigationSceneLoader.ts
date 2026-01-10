@@ -1,12 +1,16 @@
 /**
- * NavigationSceneLoader - Navigation Scene 전용 로더.
+ * NavigationSceneLoader - Navigation Scene 전용 Full Loader.
  *
- * BaseSceneLoader를 확장하여 Navigation/Tactical 파트의
- * 로딩 Phase를 정의한다.
+ * 2-Stage Loading Architecture:
+ * - 내부적으로 NavigationDataLoader를 사용하여 FETCHING 수행
+ * - 복잡한 시각화 빌드가 필요한 경우 NavigationScene처럼
+ *   DataLoader + primitives를 직접 사용하는 것이 더 적합
+ *
+ * 이 클래스는 간단한 사용 케이스를 위한 편의 래퍼.
  *
  * Phase 구성:
- * 1. FETCHING: Tactical map JSON + Environment GLB
- * 2. BUILDING: Graph 구축 + Mesh 생성 + Octree
+ * 1. FETCHING: NavigationDataLoader로 JSON/Environment fetch
+ * 2. BUILDING: Octree 생성 + Environment attach
  * 3. WARMING: Material 사전 컴파일
  * 4. BARRIER: 첫 프레임 렌더 검증
  */
@@ -19,10 +23,8 @@ import {
     RenderReadyBarrier,
     MaterialWarmupHelper,
 } from '../../../core/loading';
-import { AssetResolver } from '../../../shared/assets/AssetResolver';
 import { NavigationGraph } from '../graph/NavigationGraph';
-import { TacticalMapLoader } from '../data/TacticalMapLoader';
-import { TacticalEnvironmentLoader } from '../data/TacticalEnvironmentLoader';
+import { NavigationDataLoader } from './NavigationDataLoader';
 
 /**
  * Navigation Stage 식별자
@@ -62,12 +64,13 @@ export interface NavigationLoaderConfig {
 }
 
 /**
- * NavigationSceneLoader
+ * NavigationSceneLoader - 편의를 위한 Full Loader 래퍼
+ *
+ * NOTE: 복잡한 시각화 빌드(Visualizer, LinkNetwork 등)가 필요한 경우,
+ * NavigationScene처럼 DataLoader + primitives를 직접 조합하는 것이 더 적합합니다.
  */
 export class NavigationSceneLoader extends BaseSceneLoader<NavigationStageKey> {
-    private resolver: AssetResolver;
-    private mapLoader: TacticalMapLoader;
-    private envLoader: TacticalEnvironmentLoader;
+    private dataLoader: NavigationDataLoader;
     private warmupHelper: MaterialWarmupHelper;
     private barrier: RenderReadyBarrier;
 
@@ -77,9 +80,7 @@ export class NavigationSceneLoader extends BaseSceneLoader<NavigationStageKey> {
     constructor(scene: BABYLON.Scene, config: NavigationLoaderConfig) {
         super(scene);
         this.config = config;
-        this.resolver = new AssetResolver();
-        this.mapLoader = new TacticalMapLoader();
-        this.envLoader = new TacticalEnvironmentLoader();
+        this.dataLoader = new NavigationDataLoader(scene);
         this.warmupHelper = new MaterialWarmupHelper(scene);
         this.barrier = new RenderReadyBarrier(scene);
     }
@@ -90,32 +91,21 @@ export class NavigationSceneLoader extends BaseSceneLoader<NavigationStageKey> {
     protected definePhaseWorks(stage: NavigationStageKey): PhaseWork[] {
         const works: PhaseWork[] = [];
 
-        // === FETCHING Phase ===
+        // === FETCHING Phase (delegated to NavigationDataLoader) ===
         works.push({
             phase: LoadingPhase.FETCHING,
-            name: 'Tactical Map JSON',
-            weight: 1,
+            name: 'Data Fetch (via DataLoader)',
+            weight: 4,
             execute: async () => {
-                const url = this.resolver.tacticalMapJson(stage);
-                const data = await this.mapLoader.loadJson(url);
-                this.mapLoader.applyToGraph(this.config.graph, data);
+                const result = await this.dataLoader.fetchAndApply(
+                    stage,
+                    this.config.graph,
+                    undefined, // callbacks handled by BaseSceneLoader
+                    { skipEnvironment: this.config.skipEnvironment }
+                );
+                this.loadedEnvironment = result.environment;
             },
         });
-
-        if (!this.config.skipEnvironment) {
-            works.push({
-                phase: LoadingPhase.FETCHING,
-                name: 'Environment Model',
-                weight: 3, // GLB는 더 무거움
-                execute: async () => {
-                    const url = this.resolver.tacticalEnvironmentModel(stage);
-                    this.loadedEnvironment = await this.envLoader.tryLoadEnvironment(
-                        url,
-                        this.scene
-                    );
-                },
-            });
-        }
 
         // === BUILDING Phase ===
         works.push({
@@ -134,18 +124,7 @@ export class NavigationSceneLoader extends BaseSceneLoader<NavigationStageKey> {
                 weight: 1,
                 execute: async () => {
                     if (this.loadedEnvironment) {
-                        this.loadedEnvironment.addAllToScene();
-
-                        // Optimization: static environment
-                        for (const m of this.loadedEnvironment.meshes) {
-                            m.isPickable = false;
-                            m.freezeWorldMatrix();
-                            m.doNotSyncBoundingInfo = true;
-                        }
-                        for (const mat of this.loadedEnvironment.materials) {
-                            (mat as any).freeze?.();
-                        }
-
+                        this.dataLoader.attachEnvironment(this.loadedEnvironment);
                         // Octree update after environment insertion
                         this.scene.createOrUpdateSelectionOctree();
                     }
