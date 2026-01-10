@@ -101,6 +101,14 @@ export class NavigationScene {
         cam.upperRadiusLimit = 70;
         cam.wheelPrecision = 80;
         cam.panningSensibility = 0; // no manual panning in Phase 2.3
+
+        // [FIX] Ensure camera doesn't filter out any layer masks
+        // includeOnlyWithLayerMask = 0 means "no filter" (allow all)
+        cam.layerMask = 0x0FFFFFFF;
+        (cam as any).includeOnlyWithLayerMask = 0;
+        console.log('[NavCamera] layerMask=0x' + cam.layerMask.toString(16) +
+            ', includeOnly=0x' + ((cam as any).includeOnlyWithLayerMask ?? 0).toString(16));
+
         cam.attachControl(this.scene.getEngine().getRenderingCanvas(), true);
 
         this.scene.activeCamera = cam;
