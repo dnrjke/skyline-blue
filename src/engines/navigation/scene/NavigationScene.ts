@@ -171,6 +171,7 @@ export class NavigationScene {
             this.visualizer.dispose();
             this.visualizer = new NavigationVisualizer(this.scene, this.graph);
             this.activePath.dispose();
+            this.activePath = new ActivePathEffect(this.scene);
             this.linkNetwork.dispose();
             this.linkNetwork = new NavigationLinkNetwork(this.scene, this.graph);
 
