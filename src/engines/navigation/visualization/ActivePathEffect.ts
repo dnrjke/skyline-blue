@@ -156,10 +156,21 @@ export class ActivePathEffect {
             seg.alwaysSelectAsActiveMesh = true;
             seg.doNotSyncBoundingInfo = false;
 
-            // [FIX] World matrix 및 bounding 갱신
+            // [FIX] World matrix 및 bounding 갱신 (강제)
             seg.unfreezeWorldMatrix();
             seg.computeWorldMatrix(true);
             seg.refreshBoundingInfo(true);
+
+            // [DEBUG] Verify sync state
+            const wm = seg.getWorldMatrix();
+            const bb = seg.getBoundingInfo().boundingBox;
+            console.log(`[ActivePathEffect] ${seg.name} sync state:`, {
+                freezeWorldMatrix: (seg as any)._isWorldMatrixFrozen,
+                doNotSyncBoundingInfo: seg.doNotSyncBoundingInfo,
+                worldMatrixValid: !wm.isIdentity(),
+                boundingMin: `(${bb.minimumWorld.x.toFixed(2)}, ${bb.minimumWorld.y.toFixed(2)}, ${bb.minimumWorld.z.toFixed(2)})`,
+                boundingMax: `(${bb.maximumWorld.x.toFixed(2)}, ${bb.maximumWorld.y.toFixed(2)}, ${bb.maximumWorld.z.toFixed(2)})`
+            });
 
             this.segments.push(seg);
             console.log(`[ActivePathEffect] Created ${seg.name}:`, {
@@ -172,6 +183,22 @@ export class ActivePathEffect {
         }
 
         console.log(`[ActivePathEffect] Segments built: ${this.segments.length}`);
+
+        // [FIX] Babylon 권장: render loop 생성 mesh는 다음 프레임에서 한 번 더 sync
+        this.scene.onAfterRenderObservable.addOnce(() => {
+            for (const seg of this.segments) {
+                seg.computeWorldMatrix(true);
+                seg.refreshBoundingInfo(true);
+            }
+            console.log(`[ActivePathEffect] Deferred sync completed for ${this.segments.length} segments`);
+
+            // Check active meshes after deferred sync
+            const activeMeshes = this.scene.getActiveMeshes();
+            const inActive = this.segments.filter(s =>
+                activeMeshes.data.some((m: BABYLON.AbstractMesh) => m === s)
+            ).length;
+            console.log(`[ActivePathEffect] After deferred sync: ${inActive}/${this.segments.length} in active meshes`);
+        });
 
         // DEV 모드: 디버그 마커
         if (IS_DEV) {
