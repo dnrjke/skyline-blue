@@ -131,6 +131,13 @@ export class NavigationDebugger {
 
         this.addSpacer(12);
 
+        // Dynamic mesh tests
+        this.addLabel('--- DYNAMIC TEST ---', '#888888', 12);
+        this.addButton('Create Box at Origin', () => this.createTestBoxAtOrigin());
+        this.addButton('Unfreeze Scene', () => this.unfreezeScene());
+
+        this.addSpacer(12);
+
         // Close button
         this.addButton('[ CLOSE ]', () => this.hide(), '#ff6666');
 
@@ -210,5 +217,54 @@ export class NavigationDebugger {
         }
         this.testMeshes = [];
         console.log('[Debug] Cleaned up test meshes');
+    }
+
+    /**
+     * 동적 메시 렌더링 테스트: 원점에 큰 빨간 박스 생성
+     */
+    private createTestBoxAtOrigin(): void {
+        const box = BABYLON.MeshBuilder.CreateBox('DebugTestBox_' + Date.now(), { size: 3 }, this.scene);
+        box.position.set(0, 2, 0);
+
+        const mat = new BABYLON.StandardMaterial('DebugTestBoxMat_' + Date.now(), this.scene);
+        mat.emissiveColor = new BABYLON.Color3(1, 0, 0); // 빨강
+        mat.disableLighting = true;
+        box.material = mat;
+
+        box.computeWorldMatrix(true);
+        box.alwaysSelectAsActiveMesh = true;
+
+        this.testMeshes.push(box);
+
+        console.log('[Debug] Created RED BOX at origin (0, 2, 0), size=3');
+        console.log('[Debug] Box in scene.meshes:', this.scene.meshes.includes(box));
+        console.log('[Debug] Total meshes:', this.scene.meshes.length);
+    }
+
+    /**
+     * Scene freeze 해제 시도
+     */
+    private unfreezeScene(): void {
+        // Unfreeze active meshes if frozen
+        if ((this.scene as any)._activeMeshesFrozen) {
+            this.scene.unfreezeActiveMeshes();
+            console.log('[Debug] Unfroze active meshes');
+        } else {
+            console.log('[Debug] Active meshes were not frozen');
+        }
+
+        // Unfreeze all mesh world matrices
+        let unfrozenCount = 0;
+        for (const mesh of this.scene.meshes) {
+            if ((mesh as any)._worldMatrixDeterminantIsDirty !== undefined) {
+                mesh.unfreezeWorldMatrix();
+                unfrozenCount++;
+            }
+        }
+        console.log(`[Debug] Unfroze ${unfrozenCount} mesh world matrices`);
+
+        // Force scene to recalculate
+        this.scene.getEngine().resize();
+        console.log('[Debug] Triggered engine resize');
     }
 }
