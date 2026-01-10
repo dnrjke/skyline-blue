@@ -67,11 +67,12 @@ export class ActivePathEffect {
         // Shared material for all segments
         // Phase 2.5 Fix: Tube 대신 Cylinder 사용 (Tube는 2점 path에서 불안정)
         this.segMat = new BABYLON.StandardMaterial('ArcanaActivePathSegMat', this.scene);
-        // diffuseColor + emissiveColor 둘 다 설정 (렌더링 안정성)
+        // [FIX] disableLighting 필수: 씬 조명 없이도 emissive 색상이 온전히 표시되어야 함
+        this.segMat.disableLighting = true;
+        // emissiveColor만 사용 (disableLighting=true일 때 diffuse는 무시됨)
         const pathColor = options.isInvalid
             ? new BABYLON.Color3(1, 0.22, 0.22)
             : BABYLON.Color3.FromHexString(COLORS.HUD_NEON);
-        this.segMat.diffuseColor = pathColor;
         this.segMat.emissiveColor = pathColor;
         this.segMat.specularColor = BABYLON.Color3.Black();
         this.segMat.alpha = 1.0;
