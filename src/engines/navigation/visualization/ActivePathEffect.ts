@@ -66,20 +66,26 @@ export class ActivePathEffect {
 
         // Shared material for all segments
         // Phase 2.5 Fix: Tube 대신 Cylinder 사용 (Tube는 2점 path에서 불안정)
+        // [TEST] 테스트용: 명확히 구분되는 주황색 + 와이어프레임
         this.segMat = new BABYLON.StandardMaterial('ArcanaActivePathSegMat', this.scene);
         // [FIX] disableLighting 필수: 씬 조명 없이도 emissive 색상이 온전히 표시되어야 함
         this.segMat.disableLighting = true;
-        // emissiveColor만 사용 (disableLighting=true일 때 diffuse는 무시됨)
+        // [TEST] 테스트용 색상: 밝은 주황색 (NavNodeRing cyan과 완전히 다름)
         const pathColor = options.isInvalid
             ? new BABYLON.Color3(1, 0.22, 0.22)
-            : BABYLON.Color3.FromHexString(COLORS.HUD_NEON);
+            : new BABYLON.Color3(1.0, 0.5, 0.0); // Orange instead of cyan
         this.segMat.emissiveColor = pathColor;
         this.segMat.specularColor = BABYLON.Color3.Black();
         this.segMat.alpha = 1.0;
         this.segMat.backFaceCulling = false;
+        // [TEST] 와이어프레임 모드로 구분 용이하게
+        this.segMat.wireframe = true;
 
         // Build segments using Cylinder (more reliable than Tube for 2-point paths)
-        const diameter = (options.isInvalid ? LAYOUT.HOLOGRAM.PATH_RADIUS : LAYOUT.HOLOGRAM.PATH_RADIUS_SELECTED) * 2;
+        // [TEST] 두께 증가: 기존 값의 5배로 테스트
+        const baseDiameter = (options.isInvalid ? LAYOUT.HOLOGRAM.PATH_RADIUS : LAYOUT.HOLOGRAM.PATH_RADIUS_SELECTED) * 2;
+        const diameter = baseDiameter * 5; // 테스트용 5배 두께
+        console.log(`[ActivePathEffect] [TEST] Using diameter=${diameter.toFixed(3)} (base=${baseDiameter.toFixed(3)} x5)`);
         for (let i = 0; i < this.pathPoints.length - 1; i++) {
             const p0 = this.pathPoints[i];
             const p1 = this.pathPoints[i + 1];
