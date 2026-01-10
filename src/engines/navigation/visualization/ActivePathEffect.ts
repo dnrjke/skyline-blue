@@ -58,6 +58,27 @@ export class ActivePathEffect {
                 this.pendingPath = null;
                 console.log('[ActivePathEffect] Processing pending path in render loop:', points.length, 'points');
                 this.buildPathMeshes(points, options);
+
+                // [DEBUG] Next frame verification - check if mesh is in active meshes
+                this.scene.onAfterRenderObservable.addOnce(() => {
+                    const activeMeshes = this.scene.getActiveMeshes();
+                    const pathSegsInActive = this.segments.filter(s =>
+                        activeMeshes.data.some((m: BABYLON.AbstractMesh) => m === s)
+                    ).length;
+                    console.log(`[ActivePathEffect] POST-RENDER: ${this.segments.length} segments, ${pathSegsInActive} in active meshes`);
+
+                    // Log individual segment states
+                    for (const seg of this.segments) {
+                        console.log(`[ActivePathEffect] Segment ${seg.name}:`, {
+                            isEnabled: seg.isEnabled(),
+                            isVisible: seg.isVisible,
+                            alwaysActive: seg.alwaysSelectAsActiveMesh,
+                            renderingGroupId: seg.renderingGroupId,
+                            position: `(${seg.position.x.toFixed(2)}, ${seg.position.y.toFixed(2)}, ${seg.position.z.toFixed(2)})`,
+                            inScene: this.scene.meshes.includes(seg),
+                        });
+                    }
+                });
             }
         });
         console.log('[ActivePathEffect] Render observer registered:', !!this.renderObserver);
