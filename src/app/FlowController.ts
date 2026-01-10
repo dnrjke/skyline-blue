@@ -1,4 +1,5 @@
 import * as BABYLON from '@babylonjs/core';
+import * as GUI from '@babylonjs/gui';
 import type { BackgroundLayer } from '../shared/ui/BackgroundLayer';
 import type { BottomVignetteLayer } from '../shared/ui/BottomVignetteLayer';
 import type { CharacterLayer } from '../shared/ui/CharacterLayer';
@@ -9,11 +10,13 @@ import type { TouchToStartScene } from '../ui/startScreens/touchToStart/TouchToS
 import { INTRO_STORY } from './data/stories';
 import type { NavigationEngine } from '../engines/navigation';
 import type { StageTransitionManager } from '../core/scene/StageTransitionManager';
+import { NavigationDebugger } from '../debug/NavigationDebugger';
 
 type FlowState = 'splash' | 'touchToStart' | 'narrative' | 'navigation' | 'complete';
 
 export interface FlowControllerDeps {
     scene: BABYLON.Scene;
+    guiTexture: GUI.AdvancedDynamicTexture;
     narrativeEngine: NarrativeEngine;
     navigationEngine: NavigationEngine;
     transitions: StageTransitionManager;
@@ -30,6 +33,7 @@ export interface FlowControllerDeps {
  */
 export class FlowController {
     private scene: BABYLON.Scene;
+    private guiTexture: GUI.AdvancedDynamicTexture;
     private narrativeEngine: NarrativeEngine;
     private navigationEngine: NavigationEngine;
     private transitions: StageTransitionManager;
@@ -46,8 +50,13 @@ export class FlowController {
     private readonly INPUT_COOLDOWN_MS: number = 200;
     private navigationPointerObserver: BABYLON.Observer<BABYLON.PointerInfo> | null = null;
 
+    // Debug tools (F9 toggle)
+    private navigationDebugger: NavigationDebugger | null = null;
+    private debugKeyHandler: ((e: KeyboardEvent) => void) | null = null;
+
     constructor(deps: FlowControllerDeps) {
         this.scene = deps.scene;
+        this.guiTexture = deps.guiTexture;
         this.narrativeEngine = deps.narrativeEngine;
         this.navigationEngine = deps.navigationEngine;
         this.transitions = deps.transitions;
@@ -70,6 +79,18 @@ export class FlowController {
         if (this.navigationPointerObserver) {
             this.scene.onPointerObservable.remove(this.navigationPointerObserver);
             this.navigationPointerObserver = null;
+        }
+        this.cleanupDebugTools();
+    }
+
+    private cleanupDebugTools(): void {
+        if (this.debugKeyHandler) {
+            window.removeEventListener('keydown', this.debugKeyHandler);
+            this.debugKeyHandler = null;
+        }
+        if (this.navigationDebugger) {
+            this.navigationDebugger.dispose();
+            this.navigationDebugger = null;
         }
     }
 
@@ -237,6 +258,26 @@ export class FlowController {
                 this.navigationEngine.handleTap(this.scene.pointerX, this.scene.pointerY);
             }
         });
+
+        // Debug tools: F9로 디버그 패널 토글
+        this.setupDebugTools();
+    }
+
+    private setupDebugTools(): void {
+        // NavigationDebugger 생성
+        this.navigationDebugger = new NavigationDebugger(this.scene, this.guiTexture);
+
+        // F9 키 핸들러 등록
+        this.debugKeyHandler = (e: KeyboardEvent) => {
+            if (e.key === 'F9') {
+                e.preventDefault();
+                this.navigationDebugger?.toggle();
+                console.log('[Debug] Panel toggled via F9');
+            }
+        };
+        window.addEventListener('keydown', this.debugKeyHandler);
+
+        console.log('[Debug] Debug tools ready (Press F9 to toggle panel)');
     }
 
     private onFlowComplete(): void {
@@ -254,6 +295,9 @@ export class FlowController {
             this.navigationPointerObserver = null;
         }
         this.narrativeEngine.setPointerBlockerEnabled(true);
+
+        // Debug tools 정리
+        this.cleanupDebugTools();
     }
 
     // ============================================
