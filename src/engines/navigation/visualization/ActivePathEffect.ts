@@ -155,6 +155,7 @@ export class ActivePathEffect {
             // [FIX] Active mesh 선정 설정
             seg.alwaysSelectAsActiveMesh = true;
             seg.doNotSyncBoundingInfo = false;
+            (seg as any).doNotCheckFrustum = true; // [FIX] Frustum culling 완전 비활성화
 
             // [FIX] World matrix 및 bounding 갱신 (강제)
             seg.unfreezeWorldMatrix();
@@ -350,6 +351,7 @@ export class ActivePathEffect {
             marker.renderingGroupId = 0; // [TEST] 기본 그룹 (1에서 0으로)
 
             marker.alwaysSelectAsActiveMesh = true;
+            (marker as any).doNotCheckFrustum = true; // [FIX] Frustum culling 비활성화
             marker.unfreezeWorldMatrix();
             marker.computeWorldMatrix(true);
             marker.refreshBoundingInfo(true);
