@@ -45,9 +45,16 @@ export class PathStore {
 
     /**
      * Append node to sequence if it's connected to the previous node.
-     * Returns false if invalid transition (no edge).
+     * Returns false if invalid transition (no edge) or already visited.
+     *
+     * [Phase 2.5 Fix] 중복 방문 금지: 이미 방문한 노드는 재방문 불가
      */
     tryAppend(nodeId: string): boolean {
+        // 이미 방문한 노드인지 확인 (중복 방문 금지)
+        if (this.sequence.includes(nodeId)) {
+            return false;
+        }
+
         if (this.sequence.length === 0) {
             this.sequence = [nodeId];
             return true;

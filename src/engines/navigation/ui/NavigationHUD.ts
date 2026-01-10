@@ -23,6 +23,9 @@ export class NavigationHUD {
     private vectorThrustTitle: GUI.TextBlock;
     private vectorThrustSub: GUI.TextBlock;
 
+    private clearButton: GUI.Rectangle;
+    private clearButtonText: GUI.TextBlock;
+
     private totalsLine: GUI.TextBlock;
     private warningLine: GUI.TextBlock;
 
@@ -125,6 +128,40 @@ export class NavigationHUD {
         this.vectorThrustSub.topInPixels = 26;
         this.vectorThrustSub.isHitTestVisible = false;
         this.vectorThrustButton.addControl(this.vectorThrustSub);
+
+        // ========================================
+        // Clear Button (TOP-RIGHT, below Vector Thrust)
+        // ========================================
+        this.clearButton = new GUI.Rectangle('ClearButton');
+        this.clearButton.widthInPixels = 140;
+        this.clearButton.heightInPixels = 50;
+        this.clearButton.cornerRadius = 10;
+        this.clearButton.thickness = 2;
+        this.clearButton.color = COLORS.HUD_WARNING;
+        this.clearButton.background = 'rgba(0,0,0,0.6)';
+        this.clearButton.shadowColor = COLORS.HUD_WARNING;
+        this.clearButton.shadowBlur = 10;
+        this.clearButton.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+        this.clearButton.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        this.clearButton.leftInPixels = -LAYOUT.SAFE_AREA.RIGHT;
+        this.clearButton.topInPixels = LAYOUT.SAFE_AREA.TOP + 130;
+        this.clearButton.isHitTestVisible = true;
+        this.clearButton.isPointerBlocker = true;
+        this.root.addControl(this.clearButton);
+
+        this.clearButtonText = new GUI.TextBlock('ClearButtonText');
+        this.clearButtonText.text = 'CLEAR';
+        this.clearButtonText.fontFamily = FONT.FAMILY.TITLE;
+        this.clearButtonText.fontSizeInPixels = 22;
+        this.clearButtonText.color = COLORS.HUD_WARNING;
+        this.clearButtonText.textHorizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+        this.clearButtonText.textVerticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_CENTER;
+        this.clearButtonText.isHitTestVisible = false;
+        this.clearButton.addControl(this.clearButtonText);
+
+        this.clearButton.onPointerClickObservable.add(() => {
+            this.callbacks.onClear?.();
+        });
 
         // ========================================
         // Bottom line inside top area: totals + warning (minimal)

@@ -1,4 +1,4 @@
-import type * as BABYLON from '@babylonjs/core';
+import * as BABYLON from '@babylonjs/core';
 import type { BackgroundLayer } from '../shared/ui/BackgroundLayer';
 import type { BottomVignetteLayer } from '../shared/ui/BottomVignetteLayer';
 import type { CharacterLayer } from '../shared/ui/CharacterLayer';
@@ -44,6 +44,7 @@ export class FlowController {
     private currentFlow: FlowState = 'splash';
     private inputCooldownTimer: number | null = null;
     private readonly INPUT_COOLDOWN_MS: number = 200;
+    private navigationPointerObserver: BABYLON.Observer<BABYLON.PointerInfo> | null = null;
 
     constructor(deps: FlowControllerDeps) {
         this.scene = deps.scene;
@@ -65,6 +66,10 @@ export class FlowController {
         if (this.inputCooldownTimer !== null) {
             clearTimeout(this.inputCooldownTimer);
             this.inputCooldownTimer = null;
+        }
+        if (this.navigationPointerObserver) {
+            this.scene.onPointerObservable.remove(this.navigationPointerObserver);
+            this.navigationPointerObserver = null;
         }
     }
 
@@ -221,9 +226,16 @@ export class FlowController {
                 // 실패 시 입력은 계속 차단(깨진 상태로 입력 관통 방지)
             });
 
-        // HEBS: route all taps to navigation pick
-        this.narrativeEngine.pushInputHandler('navigation', () => {
-            this.navigationEngine.handleTap(this.scene.pointerX, this.scene.pointerY);
+        // Navigation 모드에서는 카메라 컨트롤을 위해 PointerBlocker 비활성화
+        // 노드 선택은 scene.onPointerObservable을 통해 직접 처리
+        this.narrativeEngine.setPointerBlockerEnabled(false);
+
+        // scene.onPointerObservable로 노드 선택 처리 (카메라 컨트롤과 공존)
+        this.navigationPointerObserver = this.scene.onPointerObservable.add((pointerInfo) => {
+            if (pointerInfo.type === BABYLON.PointerEventTypes.POINTERDOWN) {
+                // 노드 선택 처리
+                this.navigationEngine.handleTap(this.scene.pointerX, this.scene.pointerY);
+            }
         });
     }
 
@@ -235,7 +247,13 @@ export class FlowController {
         this.characterLayer.hideAll();
         this.bottomVignetteLayer.hide();
         this.navigationEngine.stop();
-        this.narrativeEngine.popInputHandler('navigation');
+
+        // Navigation 모드 정리
+        if (this.navigationPointerObserver) {
+            this.scene.onPointerObservable.remove(this.navigationPointerObserver);
+            this.navigationPointerObserver = null;
+        }
+        this.narrativeEngine.setPointerBlockerEnabled(true);
     }
 
     // ============================================
