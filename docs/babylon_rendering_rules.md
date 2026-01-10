@@ -4,9 +4,61 @@
 
 ---
 
+## 0. 아키텍처 개요
+
+### 간략 구조
+
+```
+Main Scene
+ ├─ Environment / Characters (RenderingPipeline)
+ └─ UtilityLayerScene
+     ├─ ActivePathEffect
+     ├─ DebugPathPoint
+     └─ Overlay FX
+```
+
+### 상세 구조
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Main Scene                              │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │              Rendering Pipeline (GlowLayer 등)             │  │
+│  │  ┌─────────────────┐  ┌─────────────────┐                 │  │
+│  │  │   Environment   │  │   Characters    │                 │  │
+│  │  │  (Terrain/Sky)  │  │  (NPC/Player)   │                 │  │
+│  │  └─────────────────┘  └─────────────────┘                 │  │
+│  │                                                           │  │
+│  │  Active Mesh Evaluation → 고정 세트만 렌더링              │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                              ▼                                  │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │              UtilityLayerScene (독립 렌더)                 │  │
+│  │  ┌─────────────────────────────────────────────────────┐  │  │
+│  │  │  ActivePathEffect                                   │  │  │
+│  │  │   ├─ Path Segments (Cylinder)                       │  │  │
+│  │  │   ├─ Debug Markers (Sphere)                         │  │  │
+│  │  │   └─ Spark Particles                                │  │  │
+│  │  ├─ NavigationLinkNetwork (선택적)                      │  │  │
+│  │  └─ 기타 Overlay/Effect                                 │  │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│  Pipeline 영향 ❌ │ 독립적 Active Mesh 평가 ✅                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 1. Rendering Pipeline 우회 (UtilityLayerRenderer)
 
-### 1.1 문제 상황
+### 1.1 UtilityLayerScene의 역할
+
+> **UtilityLayerScene은 "UI 전용"이 아니라,**
+> **Rendering Pipeline의 Active Mesh 규칙을 우회해야 하는**
+> **독립 렌더 컨텍스트로 사용한다.**
+
+### 1.2 문제 상황
+
 Babylon 8.x에서 GlowLayer, DefaultRenderingPipeline 등이 **Active Mesh Evaluation을 독점**하여,
 동적으로 생성된 메시가 렌더링에서 제외될 수 있다.
 
@@ -16,7 +68,7 @@ Babylon 8.x에서 GlowLayer, DefaultRenderingPipeline 등이 **Active Mesh Evalu
 - 화면에 표시되지 않음
 - 에러 로그 없음 (조용히 탈락)
 
-### 1.2 해결책: UtilityLayerScene 사용
+### 1.3 해결책: UtilityLayerScene 사용
 
 ```typescript
 // Effect/Overlay/UI용 메시는 UtilityLayerScene에 생성
@@ -28,7 +80,7 @@ const mesh = BABYLON.MeshBuilder.CreateCylinder('path', opts, utilityScene);
 const material = new BABYLON.StandardMaterial('mat', utilityScene);
 ```
 
-### 1.3 적용 대상
+### 1.4 적용 대상
 - ActivePathEffect (경로 시각화)
 - Debug Markers
 - Particle Effects (선택적)
@@ -39,6 +91,7 @@ const material = new BABYLON.StandardMaterial('mat', utilityScene);
 ## 2. Material 워밍업 (Precompilation)
 
 ### 2.1 문제 상황
+
 Babylon 8.x에서 `material.isReady() === false`인 메시는 **렌더링에서 즉시 탈락**한다.
 이전 버전과 달리 다음 프레임까지 대기하지 않는다.
 
@@ -67,9 +120,14 @@ private warmupMaterials(): void {
 ```
 
 ### 2.3 타이밍
+
 - **생성자**에서 워밍업 시작
 - 비동기 컴파일 (`forceCompilationAsync`)
 - 실제 메시 생성 전에 완료되도록 설계
+
+> ⚠️ **주의**: `forceCompilationAsync`는 WebGL/WebGPU 환경에 따라
+> 첫 호출 시 프레임 스파이크를 유발할 수 있으므로
+> **초기 로딩 단계**에서 실행하는 것을 권장한다.
 
 ---
 
@@ -124,6 +182,7 @@ mesh.refreshBoundingInfo(true);             // Bounding Info 갱신
 ## 5. SubMesh 강제 생성 (Babylon 8.x)
 
 ### 5.1 문제 상황
+
 일부 MeshBuilder 함수가 SubMesh를 자동 생성하지 않아 렌더링에서 탈락.
 
 ### 5.2 해결책
@@ -133,6 +192,10 @@ if (!mesh.subMeshes || mesh.subMeshes.length === 0) {
     (mesh as any)._createGlobalSubMesh?.(true);
 }
 ```
+
+> ⚠️ **주의**: `_createGlobalSubMesh`는 **Babylon 내부 API**이므로
+> 정상적인 `MeshBuilder` 경로에서 SubMesh 생성이 실패할 때만 사용한다.
+> 버전 업데이트 시 API 변경 가능성이 있으므로 최후의 수단으로 취급할 것.
 
 ---
 
@@ -150,18 +213,39 @@ if (!mesh.subMeshes || mesh.subMeshes.length === 0) {
 
 ## 7. 구조 요약
 
+### 간략 버전
+
+```
+Main Scene
+ ├─ Environment / Characters (RenderingPipeline)
+ └─ UtilityLayerScene
+     ├─ ActivePathEffect
+     ├─ DebugPathPoint
+     └─ Overlay FX
+```
+
+### 상세 버전
+
 ```
 Main Scene (Rendering Pipeline 관리)
 ├─ World / Characters / Environment
+│   ├─ Terrain (Static Mesh)
+│   ├─ NPCs (Animated Mesh)
+│   └─ Props (Instanced Mesh)
 ├─ GlowLayer / PostProcess
-└─ Active Meshes: 고정 세트
+│   └─ Active Mesh Evaluation 독점
+└─ Active Meshes: 고정 세트 (16개 등)
 
 UtilityLayerScene (독립 렌더)
 ├─ ActivePathEffect
-│   ├─ Path Segments
-│   ├─ Debug Markers
-│   └─ Particles
+│   ├─ Path Segments (Cylinder, Emissive)
+│   ├─ Debug Markers (Sphere, Magenta)
+│   └─ Spark Particles (ParticleSystem)
+├─ NavigationLinkNetwork (선택적)
 └─ 기타 Effect/Overlay
+    ├─ Tooltip
+    ├─ Selection Highlight
+    └─ Interaction Feedback
 ```
 
 ---
@@ -169,3 +253,4 @@ UtilityLayerScene (독립 렌더)
 ## 변경 이력
 
 - 2026-01-10: 초기 작성 (Babylon 8.x 대응)
+- 2026-01-10: 아키텍처 다이어그램 추가, UtilityLayer 역할 명확화, 주의사항 보완
