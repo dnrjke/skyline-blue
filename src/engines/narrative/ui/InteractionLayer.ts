@@ -118,6 +118,17 @@ export class InteractionLayer {
         return this.isEnabled;
     }
 
+    /**
+     * Set whether the click area blocks pointer events from reaching 3D scene.
+     * When false, camera controls and mesh picking work normally.
+     * Default is true (blocks events).
+     */
+    setPointerBlockerEnabled(enabled: boolean): void {
+        this.clickArea.isPointerBlocker = enabled;
+        this.clickArea.isHitTestVisible = enabled;
+        console.log(`[Input] PointerBlocker = ${enabled}`);
+    }
+
     dispose(): void {
         this.clickArea.dispose();
     }

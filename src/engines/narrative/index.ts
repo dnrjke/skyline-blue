@@ -146,6 +146,16 @@ export class NarrativeEngine {
     }
 
     /**
+     * PointerBlocker를 설정한다.
+     * - false: 3D Scene의 카메라 컨트롤 및 mesh picking 가능
+     * - true: GUI가 모든 포인터 이벤트를 차단 (기본값)
+     * - Navigation 모드에서 카메라 컨트롤을 위해 사용
+     */
+    setPointerBlockerEnabled(enabled: boolean): void {
+        this.interactionLayer.setPointerBlockerEnabled(enabled);
+    }
+
+    /**
      * 현재 UI 상태를 반환합니다. (디버그용)
      *
      * @returns 현재 UI 상태 ('idle' | 'typing' | 'waiting' | 'auto')
