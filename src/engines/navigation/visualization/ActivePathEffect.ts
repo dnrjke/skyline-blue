@@ -47,16 +47,16 @@ export class ActivePathEffect {
 
     /**
      * [FIX] Render loop 핸들러 등록
-     * - mesh 생성/갱신은 여기서만 수행
+     * - mesh 생성/갱신은 onBeforeActiveMeshesEvaluationObservable에서 수행
+     * - onBeforeRenderObservable은 너무 늦음 (active mesh 평가 이후)
      */
     private setupRenderLoopHandler(): void {
-        console.log('[ActivePathEffect] Setting up render loop handler');
-        this.renderObserver = this.scene.onBeforeRenderObservable.add(() => {
-            // [DEBUG] 매 프레임 체크 (성능상 실제 배포 시 제거)
+        console.log('[ActivePathEffect] Setting up render loop handler (onBeforeActiveMeshesEvaluation)');
+        this.renderObserver = this.scene.onBeforeActiveMeshesEvaluationObservable.add(() => {
             if (this.pendingPath) {
                 const { points, options } = this.pendingPath;
                 this.pendingPath = null;
-                console.log('[ActivePathEffect] Processing pending path in render loop:', points.length, 'points');
+                console.log('[ActivePathEffect] Processing pending path BEFORE active mesh evaluation:', points.length, 'points');
                 this.buildPathMeshes(points, options);
             }
         });
@@ -148,23 +148,92 @@ export class ActivePathEffect {
             // 속성 설정
             seg.isPickable = false;
             seg.material = this.segMat!;
-            seg.renderingGroupId = 1; // [FIX] 배경(0)과 분리
+            seg.layerMask = 0x0FFFFFFF; // [FIX] 모든 레이어 허용
+            seg.renderingGroupId = 0; // [TEST] 기본 그룹으로 변경 (1에서 0으로)
             seg.metadata = { navGlow: true, navInvalidGlow: options.isInvalid };
 
             // [FIX] Active mesh 선정 설정
             seg.alwaysSelectAsActiveMesh = true;
             seg.doNotSyncBoundingInfo = false;
+            (seg as any).doNotCheckFrustum = true; // [FIX] Frustum culling 완전 비활성화
 
-            // [FIX] World matrix 및 bounding 갱신
+            // [FIX] World matrix 및 bounding 갱신 (강제)
             seg.unfreezeWorldMatrix();
             seg.computeWorldMatrix(true);
             seg.refreshBoundingInfo(true);
 
+            // [FIX] Babylon 8.x: SubMesh 강제 생성 (없으면 렌더 탈락)
+            if (!seg.subMeshes || seg.subMeshes.length === 0) {
+                console.warn(`[ActivePathEffect] ${seg.name} has NO subMeshes! Force creating...`);
+                (seg as any)._createGlobalSubMesh?.(true);
+            }
+
+            // [FIX] Babylon 8.x: Material 강제 컴파일
+            if (this.segMat && !this.segMat.isReady(seg)) {
+                console.warn(`[ActivePathEffect] ${seg.name} material NOT ready! Force compiling...`);
+                this.segMat.forceCompilation(seg);
+            }
+
+            // [DEBUG] Babylon 8.x Renderability Check
+            console.log(`[ActivePathEffect] ${seg.name} renderability:`, {
+                subMeshCount: seg.subMeshes?.length ?? 0,
+                materialReady: this.segMat?.isReady(seg) ?? false,
+                materialName: this.segMat?.name ?? 'none',
+            });
+
+            // [DEBUG] Verify sync state
+            const wm = seg.getWorldMatrix();
+            const bb = seg.getBoundingInfo().boundingBox;
+
+            // [FIX] 강제 Scene 등록 확인 및 재등록
+            if (!this.scene.meshes.includes(seg)) {
+                console.warn(`[ActivePathEffect] ${seg.name} NOT in scene.meshes! Force adding...`);
+                this.scene.addMesh(seg);
+            }
+
+            // [DEBUG] _isActive 체크 (Scene ownership 확인)
+            const cam = this.scene.activeCamera;
+            const isActiveResult = cam ? (seg as any)._isActive?.(cam) : 'no camera';
+
+            console.log(`[ActivePathEffect] ${seg.name} ownership:`, {
+                inSceneMeshes: this.scene.meshes.includes(seg),
+                _scene: (seg as any)._scene === this.scene,
+                _isActive: isActiveResult,
+                freezeWorldMatrix: (seg as any)._isWorldMatrixFrozen,
+                doNotSyncBoundingInfo: seg.doNotSyncBoundingInfo,
+                worldMatrixValid: !wm.isIdentity(),
+                boundingMin: `(${bb.minimumWorld.x.toFixed(2)}, ${bb.minimumWorld.y.toFixed(2)}, ${bb.minimumWorld.z.toFixed(2)})`,
+                boundingMax: `(${bb.maximumWorld.x.toFixed(2)}, ${bb.maximumWorld.y.toFixed(2)}, ${bb.maximumWorld.z.toFixed(2)})`
+            });
+
             this.segments.push(seg);
-            console.log(`[ActivePathEffect] Created ${seg.name} in render loop`);
+            console.log(`[ActivePathEffect] Created ${seg.name}:`, {
+                renderingGroupId: seg.renderingGroupId,
+                layerMask: '0x' + seg.layerMask.toString(16),
+                isEnabled: seg.isEnabled(),
+                isVisible: seg.isVisible,
+                alwaysSelectAsActiveMesh: seg.alwaysSelectAsActiveMesh,
+                position: `(${seg.position.x.toFixed(2)}, ${seg.position.y.toFixed(2)}, ${seg.position.z.toFixed(2)})`
+            });
         }
 
         console.log(`[ActivePathEffect] Segments built: ${this.segments.length}`);
+
+        // [FIX] Babylon 권장: render loop 생성 mesh는 다음 프레임에서 한 번 더 sync
+        this.scene.onAfterRenderObservable.addOnce(() => {
+            for (const seg of this.segments) {
+                seg.computeWorldMatrix(true);
+                seg.refreshBoundingInfo(true);
+            }
+            console.log(`[ActivePathEffect] Deferred sync completed for ${this.segments.length} segments`);
+
+            // Check active meshes after deferred sync
+            const activeMeshes = this.scene.getActiveMeshes();
+            const inActive = this.segments.filter(s =>
+                activeMeshes.data.some((m: BABYLON.AbstractMesh) => m === s)
+            ).length;
+            console.log(`[ActivePathEffect] After deferred sync: ${inActive}/${this.segments.length} in active meshes`);
+        });
 
         // DEV 모드: 디버그 마커
         if (IS_DEV) {
@@ -297,17 +366,35 @@ export class ActivePathEffect {
             marker.position.copyFrom(this.pathPoints[i]);
             marker.material = this.debugMat;
             marker.isPickable = false;
-            marker.renderingGroupId = 1; // [FIX] 배경과 분리
+            marker.layerMask = 0x0FFFFFFF; // [FIX] 모든 레이어 허용
+            marker.renderingGroupId = 0; // [TEST] 기본 그룹 (1에서 0으로)
 
             marker.alwaysSelectAsActiveMesh = true;
+            (marker as any).doNotCheckFrustum = true; // [FIX] Frustum culling 비활성화
             marker.unfreezeWorldMatrix();
             marker.computeWorldMatrix(true);
             marker.refreshBoundingInfo(true);
 
+            // [FIX] Babylon 8.x: SubMesh 강제 생성
+            if (!marker.subMeshes || marker.subMeshes.length === 0) {
+                console.warn(`[ActivePathEffect] ${marker.name} has NO subMeshes! Force creating...`);
+                (marker as any)._createGlobalSubMesh?.(true);
+            }
+
+            // [FIX] Babylon 8.x: Material 강제 컴파일
+            if (this.debugMat && !this.debugMat.isReady(marker)) {
+                this.debugMat.forceCompilation(marker);
+            }
+
+            console.log(`[ActivePathEffect] ${marker.name} renderability:`, {
+                subMeshCount: marker.subMeshes?.length ?? 0,
+                materialReady: this.debugMat?.isReady(marker) ?? false,
+            });
+
             this.debugMarkers.push(marker);
         }
 
-        console.log(`[ActivePathEffect] DEV: Created ${this.debugMarkers.length} debug markers in render loop`);
+        console.log(`[ActivePathEffect] DEV: Created ${this.debugMarkers.length} debug markers (group 0)`);
     }
 
     private disposeDebugMarkers(): void {
@@ -347,7 +434,7 @@ export class ActivePathEffect {
     dispose(): void {
         console.log('[ActivePathEffect] dispose() called - removing render observer');
         if (this.renderObserver) {
-            this.scene.onBeforeRenderObservable.remove(this.renderObserver);
+            this.scene.onBeforeActiveMeshesEvaluationObservable.remove(this.renderObserver);
             this.renderObserver = null;
         }
         this.disposeMeshes();
