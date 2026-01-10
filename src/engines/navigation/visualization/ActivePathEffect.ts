@@ -118,16 +118,36 @@ export class ActivePathEffect {
                 }
             }
 
-            // [FIX] World Matrix 강제 업데이트 - 렌더링 전에 position/rotation 반영
-            seg.computeWorldMatrix(true);
-
+            // [FIX] 순서 중요: 먼저 속성 설정
             seg.isPickable = false;
             seg.material = this.segMat!;
-            seg.alwaysSelectAsActiveMesh = true;
             seg.renderingGroupId = 0;
             seg.metadata = { navGlow: true, navInvalidGlow: options.isInvalid };
+
+            // [FIX] Active mesh 선정을 위한 설정 (frustum culling 무시)
+            seg.alwaysSelectAsActiveMesh = true;
+
+            // [FIX] freeze 해제 (혹시 상속된 경우 대비)
+            seg.unfreezeWorldMatrix();
+
+            // [FIX] World Matrix 및 Bounding Info 강제 갱신
+            seg.computeWorldMatrix(true);
+            seg.refreshBoundingInfo(true); // force=true 로 강제 갱신
+
             this.segments.push(seg);
+
+            console.log(`[ActivePathEffect] Created ${seg.name}: alwaysSelect=${seg.alwaysSelectAsActiveMesh}, frozen=${seg.isWorldMatrixFrozen}`);
         }
+
+        // [FIX] 렌더 루프 타이밍: 다음 프레임에서 한 번 더 강제 갱신
+        // (geometry 변경이 render loop 외부에서 발생한 경우 대비)
+        this.scene.onBeforeRenderObservable.addOnce(() => {
+            for (const seg of this.segments) {
+                seg.computeWorldMatrix(true);
+                seg.refreshBoundingInfo(true);
+            }
+            console.log(`[ActivePathEffect] Deferred refresh complete for ${this.segments.length} segments`);
+        });
 
         // ========================================
         // [DEBUG] 세그먼트 생성 결과 로그 (문자열로 직접 출력)
@@ -283,15 +303,27 @@ export class ActivePathEffect {
                 this.scene
             );
             marker.position.copyFrom(this.pathPoints[i]);
-            // [FIX] World Matrix 강제 업데이트
-            marker.computeWorldMatrix(true);
             marker.material = this.debugMat;
             marker.isPickable = false;
-            marker.alwaysSelectAsActiveMesh = true;
-            // 기본 renderingGroupId 사용
             marker.renderingGroupId = 0;
+
+            // [FIX] Active mesh 및 bounding 강제 갱신
+            marker.alwaysSelectAsActiveMesh = true;
+            marker.unfreezeWorldMatrix();
+            marker.computeWorldMatrix(true);
+            marker.refreshBoundingInfo(true);
+
             this.debugMarkers.push(marker);
         }
+
+        // [FIX] 렌더 루프 타이밍: 다음 프레임에서 한 번 더 강제 갱신
+        this.scene.onBeforeRenderObservable.addOnce(() => {
+            for (const marker of this.debugMarkers) {
+                marker.computeWorldMatrix(true);
+                marker.refreshBoundingInfo(true);
+            }
+            console.log(`[ActivePathEffect] DEV: Deferred refresh for ${this.debugMarkers.length} markers`);
+        });
 
         console.log(`[ActivePathEffect] DEV: Created ${this.debugMarkers.length} debug markers`);
     }
