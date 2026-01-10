@@ -148,7 +148,8 @@ export class ActivePathEffect {
             // 속성 설정
             seg.isPickable = false;
             seg.material = this.segMat!;
-            seg.renderingGroupId = 1; // [FIX] 배경(0)과 분리
+            seg.layerMask = 0x0FFFFFFF; // [FIX] 모든 레이어 허용
+            seg.renderingGroupId = 0; // [TEST] 기본 그룹으로 변경 (1에서 0으로)
             seg.metadata = { navGlow: true, navInvalidGlow: options.isInvalid };
 
             // [FIX] Active mesh 선정 설정
@@ -161,7 +162,13 @@ export class ActivePathEffect {
             seg.refreshBoundingInfo(true);
 
             this.segments.push(seg);
-            console.log(`[ActivePathEffect] Created ${seg.name} in render loop`);
+            console.log(`[ActivePathEffect] Created ${seg.name}:`, {
+                renderingGroupId: seg.renderingGroupId,
+                layerMask: '0x' + seg.layerMask.toString(16),
+                isEnabled: seg.isEnabled(),
+                isVisible: seg.isVisible,
+                position: `(${seg.position.x.toFixed(2)}, ${seg.position.y.toFixed(2)}, ${seg.position.z.toFixed(2)})`
+            });
         }
 
         console.log(`[ActivePathEffect] Segments built: ${this.segments.length}`);
@@ -297,7 +304,8 @@ export class ActivePathEffect {
             marker.position.copyFrom(this.pathPoints[i]);
             marker.material = this.debugMat;
             marker.isPickable = false;
-            marker.renderingGroupId = 1; // [FIX] 배경과 분리
+            marker.layerMask = 0x0FFFFFFF; // [FIX] 모든 레이어 허용
+            marker.renderingGroupId = 0; // [TEST] 기본 그룹 (1에서 0으로)
 
             marker.alwaysSelectAsActiveMesh = true;
             marker.unfreezeWorldMatrix();
@@ -307,7 +315,7 @@ export class ActivePathEffect {
             this.debugMarkers.push(marker);
         }
 
-        console.log(`[ActivePathEffect] DEV: Created ${this.debugMarkers.length} debug markers in render loop`);
+        console.log(`[ActivePathEffect] DEV: Created ${this.debugMarkers.length} debug markers (group 0)`);
     }
 
     private disposeDebugMarkers(): void {
