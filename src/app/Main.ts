@@ -143,6 +143,7 @@ class Main {
         // Start game flow (delegated)
         this.flow = new FlowController({
             scene: this.scene,
+            guiTexture: this.guiManager.getTexture(),
             narrativeEngine: this.narrativeEngine,
             navigationEngine: this.navigationEngine,
             splashScene: this.splashScene,
