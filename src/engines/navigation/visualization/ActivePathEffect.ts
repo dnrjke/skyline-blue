@@ -17,12 +17,13 @@ const IS_DEV = typeof import.meta !== 'undefined' && (import.meta as any).env?.D
  * - emissive + GlowLayer로 '스카이라인' 느낌
  * - 경로 방향으로 빠른 시안 spark 파티클 흐름
  *
- * [CRITICAL FIX] Render Loop 타이밍:
- * - Mesh 생성/갱신은 반드시 onBeforeRenderObservable 안에서 수행
- * - pointer event callback에서 직접 mesh 생성 시 Active Mesh 선정에서 탈락
+ * [CRITICAL FIX] Babylon 8.x Rendering Pipeline 우회:
+ * - GlowLayer/RenderingPipeline이 Active Mesh Evaluation을 독점
+ * - UtilityLayerRenderer로 mesh를 분리하여 독립 렌더링
  */
 export class ActivePathEffect {
     private scene: BABYLON.Scene;
+    private utilityScene: BABYLON.Scene; // [FIX] Utility Layer Scene
     private segments: BABYLON.Mesh[] = [];
     private segMat: BABYLON.StandardMaterial | null = null;
     private emitter: BABYLON.Mesh | null = null;
@@ -40,9 +41,63 @@ export class ActivePathEffect {
     private pendingPath: { points: BABYLON.Vector3[]; options: ActivePathEffectOptions } | null = null;
     private renderObserver: BABYLON.Observer<BABYLON.Scene> | null = null;
 
+    /** [FIX] Material 워밍업 완료 상태 */
+    private materialsWarmedUp: boolean = false;
+
     constructor(scene: BABYLON.Scene) {
         this.scene = scene;
+
+        // [FIX] UtilityLayerRenderer로 Rendering Pipeline 우회
+        const utilLayer = BABYLON.UtilityLayerRenderer.DefaultUtilityLayer;
+        this.utilityScene = utilLayer.utilityLayerScene;
+
+        console.log('[ActivePathEffect] Using UtilityLayerScene for mesh rendering');
+
+        // [FIX] Material 사전 워밍업
+        this.warmupMaterials();
+
         this.setupRenderLoopHandler();
+    }
+
+    /**
+     * [FIX] Material 사전 컴파일 (워밍업)
+     * - Babylon 8.x에서는 material이 ready가 아니면 렌더 탈락
+     * - 더미 메시로 미리 컴파일하여 첫 프레임 지연 방지
+     */
+    private warmupMaterials(): void {
+        // Path segment material (주황색/빨간색)
+        const pathMat = new BABYLON.StandardMaterial('__PathWarmup__', this.utilityScene);
+        pathMat.disableLighting = true;
+        pathMat.emissiveColor = new BABYLON.Color3(1.0, 0.5, 0.0);
+        pathMat.backFaceCulling = false;
+
+        // Debug marker material (마젠타)
+        const debugMat = new BABYLON.StandardMaterial('__DebugWarmup__', this.utilityScene);
+        debugMat.disableLighting = true;
+        debugMat.emissiveColor = new BABYLON.Color3(1, 0, 1);
+
+        // 더미 메시로 컴파일
+        const dummy = BABYLON.MeshBuilder.CreateSphere('__PathWarmupMesh__', { diameter: 0.01 }, this.utilityScene);
+        dummy.isVisible = false;
+        dummy.material = pathMat;
+
+        // 비동기 컴파일
+        pathMat.forceCompilationAsync(dummy).then(() => {
+            dummy.material = debugMat;
+            return debugMat.forceCompilationAsync(dummy);
+        }).then(() => {
+            dummy.dispose();
+            pathMat.dispose();
+            debugMat.dispose();
+            this.materialsWarmedUp = true;
+            console.log('[ActivePathEffect] Materials precompiled successfully');
+        }).catch((err) => {
+            console.warn('[ActivePathEffect] Material warmup failed:', err);
+            dummy.dispose();
+            pathMat.dispose();
+            debugMat.dispose();
+            this.materialsWarmedUp = true; // 실패해도 진행
+        });
     }
 
     /**
@@ -101,7 +156,8 @@ export class ActivePathEffect {
 
         // Shared material for all segments
         // [TEST] 테스트용: 명확히 구분되는 주황색 + 와이어프레임
-        this.segMat = new BABYLON.StandardMaterial('ArcanaActivePathSegMat', this.scene);
+        // [FIX] Material을 UtilityScene에 생성
+        this.segMat = new BABYLON.StandardMaterial('ArcanaActivePathSegMat', this.utilityScene);
         this.segMat.disableLighting = true;
         const pathColor = options.isInvalid
             ? new BABYLON.Color3(1, 0.22, 0.22)
@@ -125,10 +181,11 @@ export class ActivePathEffect {
             const height = direction.length();
             const midPoint = p0.add(direction.scale(0.5));
 
+            // [FIX] UtilityScene에 생성하여 Rendering Pipeline 우회
             const seg = BABYLON.MeshBuilder.CreateCylinder(
                 `ArcanaActivePathSeg_${i}`,
                 { height, diameter, tessellation: 16 },
-                this.scene
+                this.utilityScene
             );
 
             seg.position.copyFrom(midPoint);
@@ -181,26 +238,14 @@ export class ActivePathEffect {
                 materialName: this.segMat?.name ?? 'none',
             });
 
-            // [DEBUG] Verify sync state
+            // [DEBUG] Verify sync state (now using utilityScene)
             const wm = seg.getWorldMatrix();
             const bb = seg.getBoundingInfo().boundingBox;
 
-            // [FIX] 강제 Scene 등록 확인 및 재등록
-            if (!this.scene.meshes.includes(seg)) {
-                console.warn(`[ActivePathEffect] ${seg.name} NOT in scene.meshes! Force adding...`);
-                this.scene.addMesh(seg);
-            }
-
-            // [DEBUG] _isActive 체크 (Scene ownership 확인)
-            const cam = this.scene.activeCamera;
-            const isActiveResult = cam ? (seg as any)._isActive?.(cam) : 'no camera';
-
-            console.log(`[ActivePathEffect] ${seg.name} ownership:`, {
-                inSceneMeshes: this.scene.meshes.includes(seg),
-                _scene: (seg as any)._scene === this.scene,
-                _isActive: isActiveResult,
+            console.log(`[ActivePathEffect] ${seg.name} in UtilityScene:`, {
+                inUtilityScene: this.utilityScene.meshes.includes(seg),
+                _scene: (seg as any)._scene === this.utilityScene,
                 freezeWorldMatrix: (seg as any)._isWorldMatrixFrozen,
-                doNotSyncBoundingInfo: seg.doNotSyncBoundingInfo,
                 worldMatrixValid: !wm.isIdentity(),
                 boundingMin: `(${bb.minimumWorld.x.toFixed(2)}, ${bb.minimumWorld.y.toFixed(2)}, ${bb.minimumWorld.z.toFixed(2)})`,
                 boundingMax: `(${bb.maximumWorld.x.toFixed(2)}, ${bb.maximumWorld.y.toFixed(2)}, ${bb.maximumWorld.z.toFixed(2)})`
@@ -219,20 +264,10 @@ export class ActivePathEffect {
 
         console.log(`[ActivePathEffect] Segments built: ${this.segments.length}`);
 
-        // [FIX] Babylon 권장: render loop 생성 mesh는 다음 프레임에서 한 번 더 sync
-        this.scene.onAfterRenderObservable.addOnce(() => {
-            for (const seg of this.segments) {
-                seg.computeWorldMatrix(true);
-                seg.refreshBoundingInfo(true);
-            }
-            console.log(`[ActivePathEffect] Deferred sync completed for ${this.segments.length} segments`);
-
-            // Check active meshes after deferred sync
-            const activeMeshes = this.scene.getActiveMeshes();
-            const inActive = this.segments.filter(s =>
-                activeMeshes.data.some((m: BABYLON.AbstractMesh) => m === s)
-            ).length;
-            console.log(`[ActivePathEffect] After deferred sync: ${inActive}/${this.segments.length} in active meshes`);
+        // [FIX] UtilityScene은 별도 렌더 파이프라인 → Active Mesh 체크 불필요
+        // 대신 utilityScene이 정상적으로 렌더되는지만 확인
+        this.utilityScene.onAfterRenderObservable.addOnce(() => {
+            console.log(`[ActivePathEffect] UtilityScene rendered with ${this.segments.length} segments, ${this.utilityScene.meshes.length} total meshes`);
         });
 
         // DEV 모드: 디버그 마커
@@ -256,14 +291,16 @@ export class ActivePathEffect {
         }
 
         // Emitter for particle flow
-        this.emitter = BABYLON.MeshBuilder.CreateSphere('ArcanaPathEmitter', { diameter: 0.01 }, this.scene);
+        // [FIX] Emitter도 UtilityScene에 생성
+        this.emitter = BABYLON.MeshBuilder.CreateSphere('ArcanaPathEmitter', { diameter: 0.01 }, this.utilityScene);
         this.emitter.isVisible = false;
         this.emitter.isPickable = false;
         this.emitter.alwaysSelectAsActiveMesh = true;
         this.emitter.position.copyFrom(this.pathPoints[0]);
 
-        this.particles = new BABYLON.ParticleSystem('ArcanaPathSparks', 2000, this.scene);
-        this.particles.particleTexture = new BABYLON.Texture(this.makeSparkTextureDataUrl(), this.scene, true, false);
+        // [FIX] ParticleSystem도 UtilityScene에 생성
+        this.particles = new BABYLON.ParticleSystem('ArcanaPathSparks', 2000, this.utilityScene);
+        this.particles.particleTexture = new BABYLON.Texture(this.makeSparkTextureDataUrl(), this.utilityScene, true, false);
         this.particles.emitter = this.emitter;
         this.particles.blendMode = BABYLON.ParticleSystem.BLENDMODE_ADD;
         const neon = BABYLON.Color3.FromHexString(COLORS.HUD_NEON);
@@ -289,8 +326,9 @@ export class ActivePathEffect {
     }
 
     burstAt(position: BABYLON.Vector3): void {
-        const ps = new BABYLON.ParticleSystem('ArcanaBurst', 500, this.scene);
-        ps.particleTexture = new BABYLON.Texture(this.makeSparkTextureDataUrl(), this.scene, true, false);
+        // [FIX] Burst ParticleSystem도 UtilityScene에 생성
+        const ps = new BABYLON.ParticleSystem('ArcanaBurst', 500, this.utilityScene);
+        ps.particleTexture = new BABYLON.Texture(this.makeSparkTextureDataUrl(), this.utilityScene, true, false);
         ps.emitter = position.clone();
         ps.blendMode = BABYLON.ParticleSystem.BLENDMODE_ADD;
         const neon = BABYLON.Color3.FromHexString(COLORS.HUD_NEON);
@@ -352,16 +390,18 @@ export class ActivePathEffect {
     private createDebugMarkers(): void {
         this.disposeDebugMarkers();
 
-        this.debugMat = new BABYLON.StandardMaterial('DebugPathMarkerMat', this.scene);
+        // [FIX] Material도 UtilityScene에 생성
+        this.debugMat = new BABYLON.StandardMaterial('DebugPathMarkerMat', this.utilityScene);
         this.debugMat.emissiveColor = new BABYLON.Color3(1, 0, 1); // 마젠타
         this.debugMat.disableLighting = true;
         this.debugMat.alpha = 1.0;
 
         for (let i = 0; i < this.pathPoints.length; i++) {
+            // [FIX] UtilityScene에 생성
             const marker = BABYLON.MeshBuilder.CreateSphere(
                 `DebugPathPoint_${i}`,
                 { diameter: 0.5 },
-                this.scene
+                this.utilityScene
             );
             marker.position.copyFrom(this.pathPoints[i]);
             marker.material = this.debugMat;
