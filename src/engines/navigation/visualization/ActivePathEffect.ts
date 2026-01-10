@@ -164,7 +164,21 @@ export class ActivePathEffect {
             // [DEBUG] Verify sync state
             const wm = seg.getWorldMatrix();
             const bb = seg.getBoundingInfo().boundingBox;
-            console.log(`[ActivePathEffect] ${seg.name} sync state:`, {
+
+            // [FIX] 강제 Scene 등록 확인 및 재등록
+            if (!this.scene.meshes.includes(seg)) {
+                console.warn(`[ActivePathEffect] ${seg.name} NOT in scene.meshes! Force adding...`);
+                this.scene.addMesh(seg);
+            }
+
+            // [DEBUG] _isActive 체크 (Scene ownership 확인)
+            const cam = this.scene.activeCamera;
+            const isActiveResult = cam ? (seg as any)._isActive?.(cam) : 'no camera';
+
+            console.log(`[ActivePathEffect] ${seg.name} ownership:`, {
+                inSceneMeshes: this.scene.meshes.includes(seg),
+                _scene: (seg as any)._scene === this.scene,
+                _isActive: isActiveResult,
                 freezeWorldMatrix: (seg as any)._isWorldMatrixFrozen,
                 doNotSyncBoundingInfo: seg.doNotSyncBoundingInfo,
                 worldMatrixValid: !wm.isIdentity(),
@@ -178,6 +192,7 @@ export class ActivePathEffect {
                 layerMask: '0x' + seg.layerMask.toString(16),
                 isEnabled: seg.isEnabled(),
                 isVisible: seg.isVisible,
+                alwaysSelectAsActiveMesh: seg.alwaysSelectAsActiveMesh,
                 position: `(${seg.position.x.toFixed(2)}, ${seg.position.y.toFixed(2)}, ${seg.position.z.toFixed(2)})`
             });
         }
