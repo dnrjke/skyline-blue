@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "episode": 1,
+  "stage": 1,
+  "grid": {
+    "size": 26,
+    "step": 2
+  },
+  "nodes": [
+    { "id": "A", "position": [-8, 0.8, -6], "energyCost": 10, "scoreGain": 50 },
+    { "id": "B", "position": [-2, 1.2, -2], "energyCost": 12, "scoreGain": 30 },
+    { "id": "C", "position": [5, 1.0, -5], "energyCost": 18, "scoreGain": 80 },
+    { "id": "D", "position": [7, 1.4, 2], "energyCost": 22, "scoreGain": 120 },
+    { "id": "E", "position": [-4, 1.1, 5], "energyCost": 16, "scoreGain": 70 }
+  ],
+  "edges": [
+    { "fromId": "A", "toId": "B", "energyCost": 4 },
+    { "fromId": "B", "toId": "C", "energyCost": 5 },
+    { "fromId": "C", "toId": "D", "energyCost": 6 },
+    { "fromId": "B", "toId": "E", "energyCost": 4 },
+    { "fromId": "E", "toId": "D", "energyCost": 7 }
+  ]
+}
