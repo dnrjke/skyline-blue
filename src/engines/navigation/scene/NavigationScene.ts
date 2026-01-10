@@ -10,11 +10,16 @@ import { ActivePathEffect } from '../visualization/ActivePathEffect';
 import { ScanLineEffect } from '../visualization/ScanLineEffect';
 import { NavigationCameraController } from './NavigationCameraController';
 import { LAYOUT } from '../../../shared/design';
-import { AssetResolver } from '../../../shared/assets/AssetResolver';
-import { TacticalMapLoader } from '../data/TacticalMapLoader';
-import { TacticalEnvironmentLoader } from '../data/TacticalEnvironmentLoader';
 import { NavigationLinkNetwork } from '../visualization/NavigationLinkNetwork';
 import type { NavigationStartHooks } from '../NavigationEngine';
+
+// 2-Stage Loading Protocol
+import { NavigationDataLoader } from '../loading/NavigationDataLoader';
+import {
+    LoadingPhase,
+    RenderReadyBarrier,
+    MaterialWarmupHelper,
+} from '../../../core/loading';
 
 export interface NavigationSceneConfig {
     energyBudget: number;
@@ -47,10 +52,11 @@ export class NavigationScene {
     private inputLocked: boolean = false;
     private launched: boolean = false;
 
-    // Phase 2.3: data-driven stage loading
-    private resolver: AssetResolver = new AssetResolver();
-    private mapLoader: TacticalMapLoader = new TacticalMapLoader();
-    private envLoader: TacticalEnvironmentLoader = new TacticalEnvironmentLoader();
+    // 2-Stage Loading Protocol
+    private dataLoader: NavigationDataLoader;
+    private warmupHelper: MaterialWarmupHelper;
+    private barrier: RenderReadyBarrier;
+    private currentPhase: LoadingPhase = LoadingPhase.PENDING;
     private environment: BABYLON.AssetContainer | null = null;
 
     // Camera swap (Main's camera <-> Navigation camera)
@@ -81,6 +87,11 @@ export class NavigationScene {
         this.activePath = new ActivePathEffect(this.scene);
         this.scanLine = new ScanLineEffect(this.scene);
         this.cameraController = new NavigationCameraController(this.scene, this.hologram, this.scanLine);
+
+        // 2-Stage Loading Protocol components
+        this.dataLoader = new NavigationDataLoader(this.scene);
+        this.warmupHelper = new MaterialWarmupHelper(this.scene);
+        this.barrier = new RenderReadyBarrier(this.scene);
     }
 
     private ensureNavigationCamera(): void {
@@ -189,14 +200,23 @@ export class NavigationScene {
         console.log('[NavigationScene] Started');
     }
 
+    /**
+     * 2-Stage Loading Protocol을 사용한 비동기 시작.
+     *
+     * Phase 순서:
+     * 1. FETCHING: DataLoader로 JSON/Environment fetch
+     * 2. BUILDING: Visualizer/LinkNetwork 빌드, Octree 생성
+     * 3. WARMING: Material 사전 컴파일
+     * 4. BARRIER: 첫 프레임 렌더 검증
+     * 5. READY: 입력 활성화, 카메라 트랜지션 시작
+     */
     private async startAsync(): Promise<void> {
-        try {
-            const hooks = this.startHooks;
-            const dbg = hooks?.dbg;
-            hooks?.onLog?.('JSON Fetch...');
-            hooks?.onProgress?.(0.05);
+        const hooks = this.startHooks;
+        const dbg = hooks?.dbg;
+        const startTime = performance.now();
 
-            // Reset previous run state
+        try {
+            // === Reset previous run state ===
             this.graph.clear();
             this.pathStore.clear();
             this.visualizer.dispose();
@@ -205,64 +225,102 @@ export class NavigationScene {
             this.activePath = new ActivePathEffect(this.scene);
             this.linkNetwork.dispose();
             this.linkNetwork = new NavigationLinkNetwork(this.scene, this.graph);
+            this.disposeEnvironment();
 
-            const url = this.resolver.tacticalMapJson(this.currentStage);
-            dbg?.begin('JSON Fetch');
-            const data = await this.mapLoader.loadJson(url);
-            const jsonMs = dbg ? dbg.end('JSON Fetch') : 0;
-            hooks?.onLog?.(`JSON Fetch: ${Math.round(jsonMs)}ms`);
+            // === FETCHING Phase ===
+            this.setPhase(LoadingPhase.FETCHING, hooks);
+            dbg?.begin('FETCHING');
 
-            dbg?.begin('Graph Apply');
-            this.mapLoader.applyToGraph(this.graph, data);
-            const applyMs = dbg ? dbg.end('Graph Apply') : 0;
-            hooks?.onLog?.(`Graph Apply: ${Math.round(applyMs)}ms`);
-            hooks?.onProgress?.(0.25);
-            hooks?.onLog?.('Graph + Mesh build...');
+            const dataResult = await this.dataLoader.fetchAndApply(
+                this.currentStage,
+                this.graph,
+                {
+                    onLog: hooks?.onLog,
+                    onProgress: (p) => hooks?.onProgress?.(p * 0.7), // 0~70%
+                }
+            );
 
-            // Build meshes after data is ready
-            dbg?.begin('Mesh Build');
+            dbg?.end('FETCHING');
+
+            // === BUILDING Phase ===
+            this.setPhase(LoadingPhase.BUILDING, hooks);
+            dbg?.begin('BUILDING');
+            hooks?.onLog?.('[BUILDING] Visualizer + LinkNetwork...');
+
+            // Build visualizations
             this.visualizer.build();
-            // Phase 2.5: show available edges immediately
             this.linkNetwork.build();
-            const meshMs = dbg ? dbg.end('Mesh Build') : 0;
-            hooks?.onLog?.(`Mesh Build: ${Math.round(meshMs)}ms`);
             this.syncUI();
 
-            // Phase 2.3: Selection octree improves picking performance on large maps.
-            // (Even if current content is small, keep the tuning in place.)
-            dbg?.begin('Octree Build');
+            // Attach environment if available
+            if (dataResult.environment) {
+                this.dataLoader.attachEnvironment(dataResult.environment);
+                this.environment = dataResult.environment;
+            }
+
+            // Selection octree
             this.scene.createOrUpdateSelectionOctree();
-            const octMs = dbg ? dbg.end('Octree Build') : 0;
-            hooks?.onLog?.(`Octree Build: ${Math.round(octMs)}ms`);
-            hooks?.onProgress?.(0.35);
-            hooks?.onLog?.('Environment Load...');
+            hooks?.onProgress?.(0.75);
 
-            // Smart loading: environment is optional and loaded via AssetContainer in background.
-            let transitionDone = false;
-            const maybeReady = () => {
-                // IMPORTANT: environment is optional and MUST NOT gate readiness.
-                // READY should unlock the planning scene as soon as core graph/meshes are ready + camera transition finished.
-                if (transitionDone) {
-                    hooks?.onProgress?.(1);
-                    hooks?.onReady?.();
-                }
-            };
-            void this.loadEnvironmentAsync();
+            dbg?.end('BUILDING');
 
-            // Transition In: alpha/beta/radius easing handled by controller
+            // === WARMING Phase ===
+            this.setPhase(LoadingPhase.WARMING, hooks);
+            dbg?.begin('WARMING');
+            hooks?.onLog?.('[WARMING] Material warmup...');
+
+            await this.warmupHelper.warmupNavigationMaterials();
+            hooks?.onProgress?.(0.85);
+
+            dbg?.end('WARMING');
+
+            // === BARRIER Phase ===
+            this.setPhase(LoadingPhase.BARRIER, hooks);
+            dbg?.begin('BARRIER');
+            hooks?.onLog?.('[BARRIER] First frame render verification...');
+
+            await this.barrier.waitForFirstFrame({
+                minActiveMeshCount: 1,
+                maxRetryFrames: 15,
+                requireCameraRender: true,
+            });
+            hooks?.onProgress?.(0.95);
+
+            dbg?.end('BARRIER');
+
+            // === READY ===
+            this.setPhase(LoadingPhase.READY, hooks);
+            const totalMs = performance.now() - startTime;
+            hooks?.onLog?.(`[READY] Loading complete: ${Math.round(totalMs)}ms`);
+
+            // Camera transition starts AFTER render-ready barrier passes
             this.cameraController.transitionIn(LAYOUT.HOLOGRAM.GRID_SIZE / 2, () => {
                 this.inputLocked = false;
-                transitionDone = true;
-                maybeReady();
+                hooks?.onProgress?.(1);
+                hooks?.onReady?.();
             });
+
         } catch (err) {
-            console.error('[NavigationScene] Stage load failed', err);
+            this.setPhase(LoadingPhase.FAILED, hooks);
+            console.error('[NavigationScene] Loading failed', err);
+            hooks?.onLog?.(`[FAILED] ${err instanceof Error ? err.message : String(err)}`);
             this.inputLocked = false;
         }
     }
 
-    private async loadEnvironmentAsync(): Promise<void> {
-        // Dispose previous env if any
+    /**
+     * Phase 전환 및 로깅
+     */
+    private setPhase(phase: LoadingPhase, hooks?: NavigationStartHooks | null): void {
+        this.currentPhase = phase;
+        console.log(`[NavigationScene] Phase: ${phase}`);
+        hooks?.onLog?.(`--- Phase: ${phase} ---`);
+    }
+
+    /**
+     * Environment 정리
+     */
+    private disposeEnvironment(): void {
         if (this.environment) {
             try {
                 this.environment.removeAllFromScene();
@@ -272,65 +330,20 @@ export class NavigationScene {
             this.environment.dispose();
             this.environment = null;
         }
-
-        const hooks = this.startHooks;
-        const dbg = hooks?.dbg;
-        const url = this.resolver.tacticalEnvironmentModel(this.currentStage);
-        dbg?.begin('Environment Load');
-        const container = await this.envLoader.tryLoadEnvironment(url, this.scene, (p01) => {
-            // 0.35..0.9 reserved for env load
-            hooks?.onProgress?.(0.35 + 0.55 * p01);
-        });
-        const envMs = dbg ? dbg.end('Environment Load') : 0;
-        if (!container) {
-            hooks?.onLog?.(`Environment Load: skipped (${Math.round(envMs)}ms)`);
-            // still advance progress close to done
-            hooks?.onProgress?.(0.95);
-            return;
-        }
-        hooks?.onLog?.(`Environment Load: ${Math.round(envMs)}ms`);
-
-        // Render as soon as it arrives.
-        dbg?.begin('Environment Attach');
-        container.addAllToScene();
-
-        // Optimization: static environment meshes/materials are frozen.
-        for (const m of container.meshes) {
-            m.isPickable = false;
-            m.freezeWorldMatrix();
-            m.doNotSyncBoundingInfo = true;
-        }
-        for (const mat of container.materials) {
-            // Some materials may already be frozen; safe to call.
-            (mat as any).freeze?.();
-        }
-
-        // Update octree after environment insertion.
-        dbg?.begin('Octree Update');
-        this.scene.createOrUpdateSelectionOctree();
-        const octMs = dbg ? dbg.end('Octree Update') : 0;
-        const attachMs = dbg ? dbg.end('Environment Attach') : 0;
-        hooks?.onProgress?.(0.95);
-        hooks?.onLog?.(`Environment Attach: ${Math.round(attachMs)}ms`);
-        hooks?.onLog?.(`Octree Update: ${Math.round(octMs)}ms`);
-        this.environment = container;
     }
 
     stop(): void {
         if (!this.active) return;
         this.active = false;
         this.inputLocked = false;
+        this.currentPhase = LoadingPhase.PENDING;
         this.hud.hide();
         this.activePath.dispose();
         this.linkNetwork.dispose();
         this.visualizer.dispose();
         this.scanLine.dispose();
         this.hologram.dispose();
-        if (this.environment) {
-            this.environment.removeAllFromScene();
-            this.environment.dispose();
-            this.environment = null;
-        }
+        this.disposeEnvironment();
         this.pathStore.clear();
         this.graph.clear();
         this.restorePreviousCamera();
@@ -339,6 +352,13 @@ export class NavigationScene {
 
     isActive(): boolean {
         return this.active;
+    }
+
+    /**
+     * 현재 로딩 Phase 조회
+     */
+    getCurrentPhase(): LoadingPhase {
+        return this.currentPhase;
     }
 
     /**

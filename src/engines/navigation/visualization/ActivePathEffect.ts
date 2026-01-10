@@ -41,9 +41,6 @@ export class ActivePathEffect {
     private pendingPath: { points: BABYLON.Vector3[]; options: ActivePathEffectOptions } | null = null;
     private renderObserver: BABYLON.Observer<BABYLON.Scene> | null = null;
 
-    /** [FIX] Material 워밍업 완료 상태 */
-    private materialsWarmedUp: boolean = false;
-
     constructor(scene: BABYLON.Scene) {
         this.scene = scene;
 
@@ -89,14 +86,12 @@ export class ActivePathEffect {
             dummy.dispose();
             pathMat.dispose();
             debugMat.dispose();
-            this.materialsWarmedUp = true;
             console.log('[ActivePathEffect] Materials precompiled successfully');
         }).catch((err) => {
             console.warn('[ActivePathEffect] Material warmup failed:', err);
             dummy.dispose();
             pathMat.dispose();
             debugMat.dispose();
-            this.materialsWarmedUp = true; // 실패해도 진행
         });
     }
 
