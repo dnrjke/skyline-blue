@@ -162,6 +162,25 @@ export class ActivePathEffect {
             seg.computeWorldMatrix(true);
             seg.refreshBoundingInfo(true);
 
+            // [FIX] Babylon 8.x: SubMesh 강제 생성 (없으면 렌더 탈락)
+            if (!seg.subMeshes || seg.subMeshes.length === 0) {
+                console.warn(`[ActivePathEffect] ${seg.name} has NO subMeshes! Force creating...`);
+                (seg as any)._createGlobalSubMesh?.(true);
+            }
+
+            // [FIX] Babylon 8.x: Material 강제 컴파일
+            if (this.segMat && !this.segMat.isReady(seg)) {
+                console.warn(`[ActivePathEffect] ${seg.name} material NOT ready! Force compiling...`);
+                this.segMat.forceCompilation(seg);
+            }
+
+            // [DEBUG] Babylon 8.x Renderability Check
+            console.log(`[ActivePathEffect] ${seg.name} renderability:`, {
+                subMeshCount: seg.subMeshes?.length ?? 0,
+                materialReady: this.segMat?.isReady(seg) ?? false,
+                materialName: this.segMat?.name ?? 'none',
+            });
+
             // [DEBUG] Verify sync state
             const wm = seg.getWorldMatrix();
             const bb = seg.getBoundingInfo().boundingBox;
@@ -355,6 +374,22 @@ export class ActivePathEffect {
             marker.unfreezeWorldMatrix();
             marker.computeWorldMatrix(true);
             marker.refreshBoundingInfo(true);
+
+            // [FIX] Babylon 8.x: SubMesh 강제 생성
+            if (!marker.subMeshes || marker.subMeshes.length === 0) {
+                console.warn(`[ActivePathEffect] ${marker.name} has NO subMeshes! Force creating...`);
+                (marker as any)._createGlobalSubMesh?.(true);
+            }
+
+            // [FIX] Babylon 8.x: Material 강제 컴파일
+            if (this.debugMat && !this.debugMat.isReady(marker)) {
+                this.debugMat.forceCompilation(marker);
+            }
+
+            console.log(`[ActivePathEffect] ${marker.name} renderability:`, {
+                subMeshCount: marker.subMeshes?.length ?? 0,
+                materialReady: this.debugMat?.isReady(marker) ?? false,
+            });
 
             this.debugMarkers.push(marker);
         }
