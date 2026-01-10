@@ -67,11 +67,12 @@ export class ActivePathEffect {
         // Shared material for all segments
         // Phase 2.5 Fix: Tube 대신 Cylinder 사용 (Tube는 2점 path에서 불안정)
         this.segMat = new BABYLON.StandardMaterial('ArcanaActivePathSegMat', this.scene);
-        // diffuseColor + emissiveColor 둘 다 설정 (렌더링 안정성)
+        // [FIX] disableLighting 필수: 씬 조명 없이도 emissive 색상이 온전히 표시되어야 함
+        this.segMat.disableLighting = true;
+        // emissiveColor만 사용 (disableLighting=true일 때 diffuse는 무시됨)
         const pathColor = options.isInvalid
             ? new BABYLON.Color3(1, 0.22, 0.22)
             : BABYLON.Color3.FromHexString(COLORS.HUD_NEON);
-        this.segMat.diffuseColor = pathColor;
         this.segMat.emissiveColor = pathColor;
         this.segMat.specularColor = BABYLON.Color3.Black();
         this.segMat.alpha = 1.0;
@@ -101,13 +102,19 @@ export class ActivePathEffect {
             // 방향 설정 (Y축에서 direction으로 회전)
             if (height > 0.001) {
                 const yAxis = BABYLON.Vector3.Up();
-                const axis = BABYLON.Vector3.Cross(yAxis, direction.normalize());
-                const angle = Math.acos(BABYLON.Vector3.Dot(yAxis, direction.normalize()));
+                const dirNorm = direction.normalize();
+                const axis = BABYLON.Vector3.Cross(yAxis, dirNorm);
+                // Math.acos의 입력을 -1~1로 클램프 (부동소수점 오차 방지)
+                const dot = Math.max(-1, Math.min(1, BABYLON.Vector3.Dot(yAxis, dirNorm)));
+                const angle = Math.acos(dot);
                 if (axis.length() > 0.001) {
                     seg.rotationQuaternion = BABYLON.Quaternion.RotationAxis(axis.normalize(), angle);
                 }
             }
-            
+
+            // [FIX] World Matrix 강제 업데이트 - 렌더링 전에 position/rotation 반영
+            seg.computeWorldMatrix(true);
+
             seg.isPickable = false;
             seg.material = this.segMat!;
             seg.alwaysSelectAsActiveMesh = true;
@@ -270,6 +277,8 @@ export class ActivePathEffect {
                 this.scene
             );
             marker.position.copyFrom(this.pathPoints[i]);
+            // [FIX] World Matrix 강제 업데이트
+            marker.computeWorldMatrix(true);
             marker.material = this.debugMat;
             marker.isPickable = false;
             marker.alwaysSelectAsActiveMesh = true;
