@@ -41,19 +41,63 @@ export class ActivePathEffect {
     private pendingPath: { points: BABYLON.Vector3[]; options: ActivePathEffectOptions } | null = null;
     private renderObserver: BABYLON.Observer<BABYLON.Scene> | null = null;
 
+    /** [FIX] Material 워밍업 완료 상태 */
+    private materialsWarmedUp: boolean = false;
+
     constructor(scene: BABYLON.Scene) {
         this.scene = scene;
 
         // [FIX] UtilityLayerRenderer로 Rendering Pipeline 우회
-        const engine = scene.getEngine();
         const utilLayer = BABYLON.UtilityLayerRenderer.DefaultUtilityLayer;
         this.utilityScene = utilLayer.utilityLayerScene;
 
-        // [DEBUG] Scene components 진단
-        console.log('[ActivePathEffect] Scene components:', (scene as any)._sceneComponents?.map((c: any) => c.name) ?? 'none');
         console.log('[ActivePathEffect] Using UtilityLayerScene for mesh rendering');
 
+        // [FIX] Material 사전 워밍업
+        this.warmupMaterials();
+
         this.setupRenderLoopHandler();
+    }
+
+    /**
+     * [FIX] Material 사전 컴파일 (워밍업)
+     * - Babylon 8.x에서는 material이 ready가 아니면 렌더 탈락
+     * - 더미 메시로 미리 컴파일하여 첫 프레임 지연 방지
+     */
+    private warmupMaterials(): void {
+        // Path segment material (주황색/빨간색)
+        const pathMat = new BABYLON.StandardMaterial('__PathWarmup__', this.utilityScene);
+        pathMat.disableLighting = true;
+        pathMat.emissiveColor = new BABYLON.Color3(1.0, 0.5, 0.0);
+        pathMat.backFaceCulling = false;
+
+        // Debug marker material (마젠타)
+        const debugMat = new BABYLON.StandardMaterial('__DebugWarmup__', this.utilityScene);
+        debugMat.disableLighting = true;
+        debugMat.emissiveColor = new BABYLON.Color3(1, 0, 1);
+
+        // 더미 메시로 컴파일
+        const dummy = BABYLON.MeshBuilder.CreateSphere('__PathWarmupMesh__', { diameter: 0.01 }, this.utilityScene);
+        dummy.isVisible = false;
+        dummy.material = pathMat;
+
+        // 비동기 컴파일
+        pathMat.forceCompilationAsync(dummy).then(() => {
+            dummy.material = debugMat;
+            return debugMat.forceCompilationAsync(dummy);
+        }).then(() => {
+            dummy.dispose();
+            pathMat.dispose();
+            debugMat.dispose();
+            this.materialsWarmedUp = true;
+            console.log('[ActivePathEffect] Materials precompiled successfully');
+        }).catch((err) => {
+            console.warn('[ActivePathEffect] Material warmup failed:', err);
+            dummy.dispose();
+            pathMat.dispose();
+            debugMat.dispose();
+            this.materialsWarmedUp = true; // 실패해도 진행
+        });
     }
 
     /**
