@@ -47,40 +47,17 @@ export class ActivePathEffect {
 
     /**
      * [FIX] Render loop 핸들러 등록
-     * - mesh 생성/갱신은 여기서만 수행
+     * - mesh 생성/갱신은 onBeforeActiveMeshesEvaluationObservable에서 수행
+     * - onBeforeRenderObservable은 너무 늦음 (active mesh 평가 이후)
      */
     private setupRenderLoopHandler(): void {
-        console.log('[ActivePathEffect] Setting up render loop handler');
-        this.renderObserver = this.scene.onBeforeRenderObservable.add(() => {
-            // [DEBUG] 매 프레임 체크 (성능상 실제 배포 시 제거)
+        console.log('[ActivePathEffect] Setting up render loop handler (onBeforeActiveMeshesEvaluation)');
+        this.renderObserver = this.scene.onBeforeActiveMeshesEvaluationObservable.add(() => {
             if (this.pendingPath) {
                 const { points, options } = this.pendingPath;
                 this.pendingPath = null;
-                console.log('[ActivePathEffect] Processing pending path in render loop:', points.length, 'points');
+                console.log('[ActivePathEffect] Processing pending path BEFORE active mesh evaluation:', points.length, 'points');
                 this.buildPathMeshes(points, options);
-
-                // [DEBUG] Check SAME frame (will be 0 due to observer order)
-                this.scene.onAfterRenderObservable.addOnce(() => {
-                    const activeMeshes = this.scene.getActiveMeshes();
-                    const pathSegsInActive = this.segments.filter(s =>
-                        activeMeshes.data.some((m: BABYLON.AbstractMesh) => m === s)
-                    ).length;
-                    console.log(`[ActivePathEffect] SAME-FRAME: ${this.segments.length} segments, ${pathSegsInActive} in active meshes`);
-                });
-
-                // [DEBUG] Check NEXT frame - should be > 0 if theory is correct
-                let frameCount = 0;
-                const nextFrameCheck = this.scene.onAfterRenderObservable.add(() => {
-                    frameCount++;
-                    if (frameCount === 2) {
-                        const activeMeshes = this.scene.getActiveMeshes();
-                        const pathSegsInActive = this.segments.filter(s =>
-                            activeMeshes.data.some((m: BABYLON.AbstractMesh) => m === s)
-                        ).length;
-                        console.log(`[ActivePathEffect] NEXT-FRAME: ${this.segments.length} segments, ${pathSegsInActive} in active meshes`);
-                        this.scene.onAfterRenderObservable.remove(nextFrameCheck);
-                    }
-                });
             }
         });
         console.log('[ActivePathEffect] Render observer registered:', !!this.renderObserver);
@@ -370,7 +347,7 @@ export class ActivePathEffect {
     dispose(): void {
         console.log('[ActivePathEffect] dispose() called - removing render observer');
         if (this.renderObserver) {
-            this.scene.onBeforeRenderObservable.remove(this.renderObserver);
+            this.scene.onBeforeActiveMeshesEvaluationObservable.remove(this.renderObserver);
             this.renderObserver = null;
         }
         this.disposeMeshes();
