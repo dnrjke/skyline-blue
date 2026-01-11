@@ -28,6 +28,49 @@ import { LoadingPhase } from '../protocol/LoadingPhase';
 import { LoadUnitStatus } from '../unit/LoadUnit';
 
 /**
+ * [Constitutional Phase Transition Rules]
+ *
+ * 절대 허용되면 안 됨:
+ *   BARRIER -> READY
+ *
+ * 반드시:
+ *   BARRIER -> VISUAL_READY -> STABILIZING_100 -> READY
+ *
+ * 이 맵은 각 phase에서 허용된 다음 phase를 정의한다.
+ */
+const ALLOWED_PHASE_TRANSITIONS: Record<LoadingPhase, LoadingPhase[]> = {
+    [LoadingPhase.PENDING]: [LoadingPhase.FETCHING],
+    [LoadingPhase.FETCHING]: [LoadingPhase.BUILDING],
+    [LoadingPhase.BUILDING]: [LoadingPhase.WARMING],
+    [LoadingPhase.WARMING]: [LoadingPhase.BARRIER],
+    [LoadingPhase.BARRIER]: [LoadingPhase.VISUAL_READY], // ← 강제: READY로 직접 갈 수 없음
+    [LoadingPhase.VISUAL_READY]: [LoadingPhase.STABILIZING_100],
+    [LoadingPhase.STABILIZING_100]: [LoadingPhase.READY],
+    [LoadingPhase.READY]: [],
+    [LoadingPhase.FAILED]: [], // Terminal state
+};
+
+/**
+ * Get the mandatory next phase after completing a phase.
+ * Returns undefined if there's no mandatory next phase (terminal states).
+ */
+export function getMandatoryNextPhase(phase: LoadingPhase): LoadingPhase | undefined {
+    const allowed = ALLOWED_PHASE_TRANSITIONS[phase];
+    return allowed.length === 1 ? allowed[0] : undefined;
+}
+
+/**
+ * Check if a phase transition is allowed.
+ */
+export function isPhaseTransitionAllowed(from: LoadingPhase, to: LoadingPhase): boolean {
+    // FAILED is always allowed (error state)
+    if (to === LoadingPhase.FAILED) return true;
+
+    const allowed = ALLOWED_PHASE_TRANSITIONS[from];
+    return allowed.includes(to);
+}
+
+/**
  * Progress phase boundaries
  */
 export const PROGRESS_BOUNDS = {
@@ -73,13 +116,23 @@ export const COMPRESSION_SETTINGS = {
 
 /**
  * Stabilization settings
+ *
+ * [TacticalGrid Incident Prevention]
+ * STABILIZING_100은 "연출용 대기"가 아니다.
+ *
+ * 목적:
+ * - 첫 프레임 떨림 제거
+ * - GPU spike 흡수
+ * - TacticalGrid가 '보인 채로 유지되는지' 확인
+ *
+ * MIN_TIME_MS OR MIN_STABLE_FRAMES 중 하나라도 충족 전엔 READY 불가
  */
 export const STABILIZATION_SETTINGS = {
     /** Minimum stabilization time (ms) */
-    MIN_TIME_MS: 400,
+    MIN_TIME_MS: 300,
 
     /** Minimum stable frames required */
-    MIN_STABLE_FRAMES: 8,
+    MIN_STABLE_FRAMES: 30,
 
     /** Maximum stabilization time (fail-safe) */
     MAX_TIME_MS: 1500,
@@ -266,9 +319,31 @@ export class ArcanaProgressModel {
 
     /**
      * Set current loading phase
+     *
+     * [Constitutional Contract]
+     * BARRIER -> READY 직접 전이는 절대 불가.
+     * 반드시 BARRIER -> VISUAL_READY -> STABILIZING_100 -> READY
      */
     setPhase(phase: LoadingPhase): void {
         if (this.currentPhase === phase) return;
+
+        // [Constitutional Guard] Phase 전이 검증
+        if (!isPhaseTransitionAllowed(this.currentPhase, phase)) {
+            const allowed = ALLOWED_PHASE_TRANSITIONS[this.currentPhase];
+            console.error(
+                `[ArcanaProgressModel] ILLEGAL PHASE TRANSITION BLOCKED: ` +
+                `${this.currentPhase} -> ${phase}. ` +
+                `Allowed: ${allowed.join(', ') || 'none (terminal state)'}`
+            );
+            // 강제로 올바른 다음 phase로 전이
+            const mandatory = getMandatoryNextPhase(this.currentPhase);
+            if (mandatory) {
+                console.warn(`[ArcanaProgressModel] Forcing transition to: ${mandatory}`);
+                phase = mandatory;
+            } else {
+                return; // Terminal state - cannot transition
+            }
+        }
 
         const prevPhase = this.currentPhase;
         this.currentPhase = phase;

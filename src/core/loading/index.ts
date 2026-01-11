@@ -89,6 +89,9 @@ export {
     PROGRESS_BOUNDS,
     COMPRESSION_SETTINGS,
     STABILIZATION_SETTINGS,
+    // Constitutional Phase Transition Guards
+    getMandatoryNextPhase,
+    isPhaseTransitionAllowed,
 } from './progress/ArcanaProgressModel';
 export type {
     ProgressSnapshot,
