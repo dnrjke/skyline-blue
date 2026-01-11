@@ -24,6 +24,7 @@ import { GUIManager } from '../shared/ui/GUIManager';
 import { BackgroundLayer } from '../shared/ui/BackgroundLayer';
 import { CharacterLayer } from '../shared/ui/CharacterLayer';
 import { BottomVignetteLayer } from '../shared/ui/BottomVignetteLayer';
+import { MobileDebugConsole } from '../shared/ui/MobileDebugConsole';
 import { NarrativeEngine } from '../engines/narrative';
 import { SplashScene } from '../ui/startScreens/splash/SplashScene';
 import { TouchToStartScene } from '../ui/startScreens/touchToStart/TouchToStartScene';
@@ -50,6 +51,7 @@ class Main {
     private backgroundLayer: BackgroundLayer;
     private bottomVignetteLayer: BottomVignetteLayer;
     private characterLayer: CharacterLayer;
+    private debugConsole: MobileDebugConsole;
 
     // Start Screens (Narrative Engine 외부)
     private splashScene: SplashScene;
@@ -97,6 +99,9 @@ class Main {
 
         // Initialize GUI system (HEBS layer hierarchy)
         this.guiManager = new GUIManager(this.scene);
+
+        // Mobile Debug Console (top center toggle button for iPhone debugging)
+        this.debugConsole = new MobileDebugConsole(this.guiManager.getSkipLayer());
 
         // Phase 2.5: shared loading engine lives in SkipLayer (transition UI)
         this.loadingEngine = new ArcanaLoadingEngine(this.guiManager.getSkipLayer(), { debugMode: true });
@@ -218,6 +223,7 @@ class Main {
         this.characterLayer.dispose();
         this.bottomVignetteLayer.dispose();
         this.backgroundLayer.dispose();
+        this.debugConsole.dispose();
         this.guiManager.dispose();
         this.renderQuality.dispose();
         this.scene.dispose();
