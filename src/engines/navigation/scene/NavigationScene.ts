@@ -13,13 +13,22 @@ import { LAYOUT } from '../../../shared/design';
 import { NavigationLinkNetwork } from '../visualization/NavigationLinkNetwork';
 import type { NavigationStartHooks } from '../NavigationEngine';
 
-// 2-Stage Loading Protocol
-import { NavigationDataLoader } from '../loading/NavigationDataLoader';
+// LoadUnit-based Loading Architecture
 import {
     LoadingPhase,
-    RenderReadyBarrier,
-    MaterialWarmupHelper,
+    ArcanaLoadingOrchestrator,
+    MaterialWarmupUnit,
+    RenderReadyBarrierUnit,
+    BarrierRequirement,
 } from '../../../core/loading';
+import {
+    DataFetchUnit,
+    EnvironmentUnit,
+    TacticalGridUnit,
+    GraphVisualizerUnit,
+    LinkNetworkUnit,
+    OctreeUnit,
+} from '../loading/units';
 
 export interface NavigationSceneConfig {
     energyBudget: number;
@@ -52,12 +61,10 @@ export class NavigationScene {
     private inputLocked: boolean = false;
     private launched: boolean = false;
 
-    // 2-Stage Loading Protocol
-    private dataLoader: NavigationDataLoader;
-    private warmupHelper: MaterialWarmupHelper;
-    private barrier: RenderReadyBarrier;
+    // LoadUnit-based Loading Architecture
+    private orchestrator: ArcanaLoadingOrchestrator | null = null;
+    private environmentUnit: EnvironmentUnit | null = null;
     private currentPhase: LoadingPhase = LoadingPhase.PENDING;
-    private environment: BABYLON.AssetContainer | null = null;
 
     // Camera swap (Main's camera <-> Navigation camera)
     private previousCamera: BABYLON.Camera | null = null;
@@ -87,11 +94,6 @@ export class NavigationScene {
         this.activePath = new ActivePathEffect(this.scene);
         this.scanLine = new ScanLineEffect(this.scene);
         this.cameraController = new NavigationCameraController(this.scene, this.hologram, this.scanLine);
-
-        // 2-Stage Loading Protocol components
-        this.dataLoader = new NavigationDataLoader(this.scene);
-        this.warmupHelper = new MaterialWarmupHelper(this.scene);
-        this.barrier = new RenderReadyBarrier(this.scene);
     }
 
     private ensureNavigationCamera(): void {
@@ -201,13 +203,13 @@ export class NavigationScene {
     }
 
     /**
-     * 2-Stage Loading Protocol을 사용한 비동기 시작.
+     * LoadUnit-based 비동기 시작.
      *
-     * Phase 순서:
-     * 1. FETCHING: DataLoader로 JSON/Environment fetch
-     * 2. BUILDING: Visualizer/LinkNetwork 빌드, Octree 생성
-     * 3. WARMING: Material 사전 컴파일
-     * 4. BARRIER: 첫 프레임 렌더 검증
+     * ArcanaLoadingOrchestrator를 사용하여 모든 LoadUnit을 실행:
+     * 1. FETCHING: DataFetchUnit (JSON/Graph)
+     * 2. BUILDING: TacticalGridUnit, GraphVisualizerUnit, LinkNetworkUnit, OctreeUnit
+     * 3. WARMING: MaterialWarmupUnit
+     * 4. BARRIER: RenderReadyBarrierUnit (첫 프레임 렌더 검증)
      * 5. READY: 입력 활성화, 카메라 트랜지션 시작
      */
     private async startAsync(): Promise<void> {
@@ -226,79 +228,114 @@ export class NavigationScene {
             this.linkNetwork.dispose();
             this.linkNetwork = new NavigationLinkNetwork(this.scene, this.graph);
             this.disposeEnvironment();
+            this.orchestrator?.dispose();
 
-            // === FETCHING Phase ===
-            this.setPhase(LoadingPhase.FETCHING, hooks);
-            dbg?.begin('FETCHING');
+            // === Create LoadUnit-based Orchestrator ===
+            this.orchestrator = new ArcanaLoadingOrchestrator(this.scene, {
+                enableCompressionAnimation: true,
+                barrierValidation: {
+                    minActiveMeshCount: 1,
+                    maxRetryFrames: 15,
+                },
+            });
 
-            const dataResult = await this.dataLoader.fetchAndApply(
-                this.currentStage,
-                this.graph,
-                {
-                    onLog: hooks?.onLog,
-                    onProgress: (p) => hooks?.onProgress?.(p * 0.7), // 0~70%
-                }
-            );
+            // Subscribe to loading state for progress/UI updates
+            this.orchestrator.subscribe({
+                onStateChange: (state) => {
+                    this.currentPhase = state.phase;
+                    hooks?.onProgress?.(state.progress);
+                },
+                onUnitStart: (unitId, displayName) => {
+                    hooks?.onLog?.(`Loading: ${displayName ?? unitId}...`);
+                },
+                onBarrierEnter: () => {
+                    dbg?.begin('BARRIER');
+                    hooks?.onLog?.('[BARRIER] First frame render verification...');
+                },
+                onBarrierResolve: () => {
+                    dbg?.end('BARRIER');
+                },
+                onLaunch: () => {
+                    hooks?.onLog?.('[LAUNCH] Loading complete!');
+                },
+            });
 
-            dbg?.end('FETCHING');
+            // === Create and Register all LoadUnits ===
+            // Store EnvironmentUnit reference for disposal
+            this.environmentUnit = new EnvironmentUnit({
+                stage: this.currentStage,
+            });
 
-            // === BUILDING Phase ===
-            this.setPhase(LoadingPhase.BUILDING, hooks);
-            dbg?.begin('BUILDING');
-            hooks?.onLog?.('[BUILDING] Visualizer + LinkNetwork...');
+            this.orchestrator.registerUnits([
+                // FETCHING phase
+                new DataFetchUnit({
+                    graph: this.graph,
+                    stage: this.currentStage,
+                }),
+                this.environmentUnit,
 
-            // Build visualizations
-            this.visualizer.build();
-            this.linkNetwork.build();
+                // BUILDING phase
+                new TacticalGridUnit({
+                    hologram: this.hologram,
+                    initialVisibility: 0,
+                }),
+                new GraphVisualizerUnit({
+                    visualizer: this.visualizer,
+                    graph: this.graph,
+                }),
+                new LinkNetworkUnit({
+                    linkNetwork: this.linkNetwork,
+                }),
+                new OctreeUnit(),
+
+                // WARMING phase
+                MaterialWarmupUnit.createNavigationWarmupUnit(),
+
+                // BARRIER phase - 렌더링 준비 완료 검증
+                // TacticalGrid는 visibility=0으로 시작 (fade-in) → RENDER_READY 증거 사용
+                // RENDER_READY: 생성 완료 확인, visibility 무시 (의도적 0 허용)
+                RenderReadyBarrierUnit.createForNavigation({
+                    requirements: [
+                        {
+                            id: this.hologram.getGridMeshName(),
+                            evidence: 'RENDER_READY',
+                        } as BarrierRequirement,
+                    ],
+                }),
+            ]);
+
+            // Attach environment after FETCHING phase (before BUILDING)
+            // This is handled by the EnvironmentUnit itself via attachToScene()
+
+            // === Execute all LoadUnits via Orchestrator ===
+            dbg?.begin('LOADING');
+
+            const result = await this.orchestrator.execute({
+                onLog: hooks?.onLog,
+                onReady: () => {
+                    // Camera transition starts AFTER render-ready barrier passes
+                    this.cameraController.transitionIn(LAYOUT.HOLOGRAM.GRID_SIZE / 2, () => {
+                        this.inputLocked = false;
+                        hooks?.onProgress?.(1);
+                        hooks?.onReady?.();
+                    });
+                },
+                onError: (err) => {
+                    console.error('[NavigationScene] Loading failed', err);
+                },
+            });
+
+            dbg?.end('LOADING');
+
+            // Sync UI after all units complete
             this.syncUI();
 
-            // Attach environment if available
-            if (dataResult.environment) {
-                this.dataLoader.attachEnvironment(dataResult.environment);
-                this.environment = dataResult.environment;
-            }
-
-            // Selection octree
-            this.scene.createOrUpdateSelectionOctree();
-            hooks?.onProgress?.(0.75);
-
-            dbg?.end('BUILDING');
-
-            // === WARMING Phase ===
-            this.setPhase(LoadingPhase.WARMING, hooks);
-            dbg?.begin('WARMING');
-            hooks?.onLog?.('[WARMING] Material warmup...');
-
-            await this.warmupHelper.warmupNavigationMaterials();
-            hooks?.onProgress?.(0.85);
-
-            dbg?.end('WARMING');
-
-            // === BARRIER Phase ===
-            this.setPhase(LoadingPhase.BARRIER, hooks);
-            dbg?.begin('BARRIER');
-            hooks?.onLog?.('[BARRIER] First frame render verification...');
-
-            await this.barrier.waitForFirstFrame({
-                minActiveMeshCount: 1,
-                maxRetryFrames: 15,
-                requireCameraRender: true,
-            });
-            hooks?.onProgress?.(0.95);
-
-            dbg?.end('BARRIER');
-
-            // === READY ===
-            this.setPhase(LoadingPhase.READY, hooks);
             const totalMs = performance.now() - startTime;
-            hooks?.onLog?.(`[READY] Loading complete: ${Math.round(totalMs)}ms`);
+            hooks?.onLog?.(`[READY] Total loading time: ${Math.round(totalMs)}ms`);
 
-            // Camera transition starts AFTER render-ready barrier passes
-            this.cameraController.transitionIn(LAYOUT.HOLOGRAM.GRID_SIZE / 2, () => {
-                this.inputLocked = false;
-                hooks?.onProgress?.(1);
-                hooks?.onReady?.();
-            });
+            if (result.phase === LoadingPhase.FAILED) {
+                throw result.error ?? new Error('Loading failed');
+            }
 
         } catch (err) {
             this.setPhase(LoadingPhase.FAILED, hooks);
@@ -321,14 +358,9 @@ export class NavigationScene {
      * Environment 정리
      */
     private disposeEnvironment(): void {
-        if (this.environment) {
-            try {
-                this.environment.removeAllFromScene();
-            } catch {
-                // ignore
-            }
-            this.environment.dispose();
-            this.environment = null;
+        if (this.environmentUnit) {
+            this.environmentUnit.dispose();
+            this.environmentUnit = null;
         }
     }
 
@@ -337,6 +369,9 @@ export class NavigationScene {
         this.active = false;
         this.inputLocked = false;
         this.currentPhase = LoadingPhase.PENDING;
+        this.orchestrator?.cancel();
+        this.orchestrator?.dispose();
+        this.orchestrator = null;
         this.hud.hide();
         this.activePath.dispose();
         this.linkNetwork.dispose();
