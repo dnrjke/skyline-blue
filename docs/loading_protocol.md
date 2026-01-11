@@ -61,59 +61,82 @@
 
 ---
 
-## 디렉터리 구조
+## Arcana Evidence Model (Constitutional Redesign)
+
+> Phase 2.5에서 확립된 Barrier 검증의 헌법적 원칙
+
+### NON-NEGOTIABLE PRINCIPLES
 
 ```
-src/core/loading/
-├── protocol/
-│   ├── LoadingPhase.ts          # Phase enum
-│   ├── LoadingResult.ts         # 결과 타입 + onAfterReady hook
-│   └── SceneLoaderProtocol.ts   # 추상 인터페이스 + BaseSceneLoader
-├── barrier/
-│   └── RenderReadyBarrier.ts    # 첫 프레임 검증 (Camera validation + RETRY)
-├── warmup/
-│   └── MaterialWarmupHelper.ts  # Material 사전 컴파일 래퍼
-└── index.ts
+1. TacticalGrid는 가장 시각적으로 지배적인 자산이다.
+   → Barrier 표준을 정의하는 것은 TacticalGrid이지, 그 반대가 아니다.
 
-src/engines/navigation/loading/
-├── NavigationDataLoader.ts      # 순수 데이터 fetch (FETCHING phase)
-├── NavigationSceneLoader.ts     # Full loader 편의 래퍼
-└── index.ts
+2. visibility = 0은 의도적 설계 선택이다 (fade-in 애니메이션).
+   → Zero visibility는 실패가 아니다.
 
-src/engines/flight/loading/      # (미래 확장)
-├── FlightDataLoader.ts          # Flight 전용 데이터 fetch
-├── FlightSceneLoader.ts         # Flight 전용 full loader
-└── index.ts
+3. Barrier는 "렌더링 준비 완료"를 검증해야지, "현재 렌더링 중"을 검증하면 안 된다.
+   → Construction readiness ≠ Presentation state
+
+4. Barrier 실패는 "진짜 논리적 불가능"을 의미해야 한다.
+   → "엔진이 아직 따라오지 못함"이 아님
 ```
 
----
+### Evidence Types
 
-## 2-Stage Loading Architecture
+| Evidence Type | 설명 | 검증 항목 | 사용 사례 |
+|---------------|------|----------|----------|
+| `ACTIVE_MESH` | activeMeshes 포함 | Babylon frustum culling | 일반 Mesh |
+| `VISIBLE_MESH` | 가시성 검증 (레거시) | visibility > 0 필수 | 즉시 보여야 하는 메시 |
+| `RENDER_READY` | 생성 완료 검증 | **visibility 무시** | TacticalGrid 등 fade-in 메시 |
+| `CUSTOM` | 커스텀 predicate | 도메인 로직 | 특수 조건 |
 
-### Stage 1: DataLoader (순수 데이터 fetch)
+### RENDER_READY vs VISIBLE_MESH
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                     RENDER_READY (권장)                             │
+├────────────────────────────────────────────────────────────────────┤
+│ 질문: "이 메시가 visibility > 0이 되면 렌더링될 수 있는가?"          │
+│                                                                     │
+│ [검증 O]                    │ [검증 X]                              │
+│ ✓ mesh 존재                 │ ✗ visibility                          │
+│ ✓ dispose 안 됨             │ ✗ isVisible                           │
+│ ✓ scene에 등록됨            │ ✗ alpha / material opacity            │
+│ ✓ geometry 있음 (vertices)  │ ✗ activeMeshes 포함 여부              │
+│                             │ ✗ isEnabled (presentation choice)     │
+└────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────┐
+│                     VISIBLE_MESH (레거시)                           │
+├────────────────────────────────────────────────────────────────────┤
+│ 질문: "이 메시가 현재 보이는가?"                                     │
+│                                                                     │
+│ [검증 O]                                                            │
+│ ✓ mesh 존재, dispose 안 됨, scene 등록                              │
+│ ✓ visibility > 0 (필수)                                             │
+│ ✓ isEnabled = true                                                  │
+│ ✓ layerMask 카메라 일치                                             │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+### TacticalGrid가 RENDER_READY를 사용하는 이유
 
 ```typescript
-// NavigationDataLoader - FETCHING phase만 담당
-const dataLoader = new NavigationDataLoader(scene);
-const result = await dataLoader.fetchAndApply(stage, graph);
-// result.environment, result.timings 등 반환
-```
+// TacticalGrid 로딩 흐름
+hologram.enable();           // mesh 생성
+hologram.setVisibility(0);   // 의도적으로 0 (fade-in 대기)
+// ... BARRIER 검증 ...
+// ... 진입 후 fade-in 시작 ...
+hologram.setVisibility(1);   // 사용자에게 보임
 
-### Stage 2: Scene 조율 (BUILDING, WARMING, BARRIER)
+// VISIBLE_MESH를 사용하면?
+// → visibility = 0이므로 "Visibility is 0" 에러로 실패
+// → 이것은 CATEGORY ERROR: 의도적 상태를 실패로 판정
 
-```typescript
-// NavigationScene이 직접 primitives 조합
-this.setPhase(LoadingPhase.BUILDING);
-this.visualizer.build();
-this.linkNetwork.build();
-
-this.setPhase(LoadingPhase.WARMING);
-await this.warmupHelper.warmupNavigationMaterials();
-
-this.setPhase(LoadingPhase.BARRIER);
-await this.barrier.waitForFirstFrame({ ... });
-
-this.setPhase(LoadingPhase.READY);
+// RENDER_READY를 사용하면?
+// → visibility 무시, 생성 완료만 확인
+// → "visibility > 0이 되는 순간 렌더링된다" 증명
+// → 올바른 Barrier 통과
 ```
 
 ---
@@ -122,11 +145,24 @@ this.setPhase(LoadingPhase.READY);
 
 ```typescript
 interface BarrierValidation {
-  requiredMeshNames?: string[];      // 필수 메시 이름
+  // 레거시: ACTIVE_MESH 증거로 변환됨
+  requiredMeshNames?: string[];
+
+  // 새로운 증거 기반 검증 (권장)
+  requirements?: BarrierRequirement[];
+
   minActiveMeshCount?: number;       // 최소 active mesh 수 (기본: 1)
   maxRetryFrames?: number;           // 최대 재시도 프레임 수 (기본: 10)
   requireCameraRender?: boolean;     // 카메라 검증 (기본: true)
 }
+
+interface BarrierRequirement {
+  id: string;                        // 식별자 (보통 메시 이름)
+  evidence: BarrierEvidence;         // 증거 유형
+  predicate?: (scene: Scene) => boolean;  // 커스텀 검증
+}
+
+type BarrierEvidence = 'ACTIVE_MESH' | 'VISIBLE_MESH' | 'RENDER_READY' | 'CUSTOM';
 ```
 
 ### Camera Validation
@@ -140,6 +176,136 @@ enum BarrierResult {
   SUCCESS,       // 검증 성공
   RETRY,         // 재시도 필요 (아직 준비 안 됨)
   FATAL_FAILURE, // 치명적 실패 (복구 불가)
+}
+```
+
+---
+
+## 디렉터리 구조
+
+```
+src/core/loading/
+├── protocol/
+│   ├── LoadingPhase.ts          # Phase enum
+│   ├── LoadingResult.ts         # 결과 타입 + onAfterReady hook
+│   └── SceneLoaderProtocol.ts   # 추상 인터페이스 + BaseSceneLoader
+├── barrier/
+│   └── RenderReadyBarrier.ts    # 첫 프레임 검증 (Evidence Model)
+├── warmup/
+│   └── MaterialWarmupHelper.ts  # Material 사전 컴파일 래퍼
+├── unit/
+│   ├── LoadUnit.ts              # LoadUnit 인터페이스
+│   ├── LoadingRegistry.ts       # LoadUnit 등록/관리
+│   ├── LoadingProtocol.ts       # Phase별 LoadUnit 실행
+│   ├── MaterialWarmupUnit.ts    # Material warmup as LoadUnit
+│   └── RenderReadyBarrierUnit.ts # Barrier as LoadUnit
+├── progress/
+│   ├── ArcanaProgressModel.ts   # Phase 기반 진행률
+│   └── LoadingStateEmitter.ts   # 반응형 상태 이벤트
+├── orchestrator/
+│   └── ArcanaLoadingOrchestrator.ts  # 통합 오케스트레이터
+└── index.ts
+
+src/engines/navigation/loading/
+├── units/
+│   ├── DataFetchUnit.ts         # FETCHING: 데이터 로드
+│   ├── EnvironmentUnit.ts       # FETCHING: 환경 로드
+│   ├── TacticalGridUnit.ts      # BUILDING: 그리드 생성
+│   ├── GraphVisualizerUnit.ts   # BUILDING: 그래프 시각화
+│   ├── LinkNetworkUnit.ts       # BUILDING: 링크 네트워크
+│   └── OctreeUnit.ts            # BUILDING: 공간 분할
+├── NavigationDataLoader.ts      # 레거시 데이터 fetch
+└── index.ts
+```
+
+---
+
+## LoadUnit 아키텍처
+
+### Phase별 validate() 원칙
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                    validate() 책임 분리                             │
+├────────────────────────────────────────────────────────────────────┤
+│ FETCHING / BUILDING / WARMING:                                      │
+│   validate() = "생성되었는가?"                                       │
+│   ✓ 객체 존재                                                       │
+│   ✓ dispose 안 됨                                                   │
+│   ✓ scene에 등록됨                                                  │
+│   ✗ 렌더링 가시성 (NO!)                                             │
+│                                                                     │
+│ BARRIER:                                                            │
+│   validate() = "렌더링 준비 완료인가?"                               │
+│   → RenderReadyBarrier가 Evidence 기반으로 검증                     │
+│   → visibility = 0 허용 (RENDER_READY)                              │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+### 예시: TacticalGridUnit
+
+```typescript
+// TacticalGridUnit.ts
+class TacticalGridUnit extends BaseLoadUnit {
+  readonly phase = LoadingPhase.BUILDING;
+
+  async load(scene: Scene): Promise<void> {
+    this.config.hologram.enable();
+    this.config.hologram.setVisibility(0);  // 의도적 0
+  }
+
+  validate(_scene: Scene): boolean {
+    // "생성되었는가?"만 확인 - visibility 무시
+    return this.config.hologram.isCreated();
+  }
+}
+
+// NavigationScene.ts - Barrier 설정
+RenderReadyBarrierUnit.createForNavigation({
+  requirements: [{
+    id: 'TacticalGrid',
+    evidence: 'RENDER_READY',  // visibility 무시
+  }],
+})
+```
+
+---
+
+## NavigationScene 로딩 흐름
+
+```typescript
+private async startAsync(): Promise<void> {
+  // === LoadUnit 등록 ===
+  this.orchestrator.registerAll([
+    // FETCHING
+    new DataFetchUnit({ ... }),
+    new EnvironmentUnit({ ... }),
+
+    // BUILDING
+    new TacticalGridUnit({ hologram: this.hologram }),
+    new GraphVisualizerUnit({ ... }),
+    new LinkNetworkUnit({ ... }),
+    new OctreeUnit(),
+
+    // WARMING
+    MaterialWarmupUnit.createNavigationWarmupUnit(),
+
+    // BARRIER
+    RenderReadyBarrierUnit.createForNavigation({
+      requirements: [{
+        id: 'TacticalGrid',
+        evidence: 'RENDER_READY',  // visibility = 0 허용
+      }],
+    }),
+  ]);
+
+  // === 실행 ===
+  await this.orchestrator.execute({
+    onReady: () => {
+      this.cameraController.transitionIn(...);
+      this.inputLocked = false;
+    },
+  });
 }
 ```
 
@@ -169,69 +335,27 @@ export class FlightDataLoader {
 ```typescript
 // src/engines/flight/scene/FlightScene.ts
 private async startAsync(): Promise<void> {
-  // === FETCHING ===
-  this.setPhase(LoadingPhase.FETCHING);
-  const data = await this.dataLoader.fetchAndApply(stage);
+  this.orchestrator.registerAll([
+    // FETCHING
+    new FlightDataFetchUnit({ ... }),
 
-  // === BUILDING ===
-  this.setPhase(LoadingPhase.BUILDING);
-  this.setupFlightCamera();
-  this.attachCharacterModel(data.characterModel);
-  this.setupSkybox(data.skybox);
+    // BUILDING
+    new CharacterModelUnit({ ... }),
+    new SkyboxUnit({ ... }),
 
-  // === WARMING ===
-  this.setPhase(LoadingPhase.WARMING);
-  await this.warmupHelper.warmupFlightMaterials();
-  // Trail, Afterimage 등 Flight 전용 Material
+    // WARMING
+    MaterialWarmupUnit.createFlightWarmupUnit(),
 
-  // === BARRIER ===
-  this.setPhase(LoadingPhase.BARRIER);
-  await this.barrier.waitForFirstFrame({
-    requiredMeshNames: ['__FlightCharacter__', '__FlightSkybox__'],
-    minActiveMeshCount: 3,
-  });
+    // BARRIER
+    RenderReadyBarrierUnit.createForFlight({
+      requirements: [
+        { id: '__FlightCharacter__', evidence: 'RENDER_READY' },
+        { id: '__FlightSkybox__', evidence: 'ACTIVE_MESH' },
+      ],
+    }),
+  ]);
 
-  // === READY ===
-  this.setPhase(LoadingPhase.READY);
-  // 입력 활성화, 비행 시작
-}
-```
-
-### 3. Flight 전용 Material Warmup
-
-```typescript
-// MaterialWarmupHelper 확장
-async warmupFlightMaterials(): Promise<void> {
-  await this.warmup({
-    materials: [
-      (s) => createTrailMaterial(s),
-      (s) => createAfterImageMaterial(s),
-      (s) => createSkyboxMaterial(s),
-    ],
-    useUtilityLayer: true,
-  });
-}
-```
-
----
-
-## Navigation → Flight 전환
-
-```typescript
-// FlowController 또는 상위 관리자
-async transitionToFlight(flightCurve: BABYLON.Curve3): Promise<void> {
-  // 1. Navigation 종료
-  this.navigationScene.stop();
-
-  // 2. Flight 로딩 시작 (새 로딩 프로토콜)
-  this.flightScene.start({
-    curve: flightCurve,
-    onPhaseChange: (phase) => this.overlay.setPhase(phase),
-    onReady: () => {
-      // Flight READY 후에만 입력 활성화
-      this.flightScene.beginFlight();
-    },
-  });
+  await this.orchestrator.execute({ ... });
 }
 ```
 
@@ -241,24 +365,42 @@ async transitionToFlight(flightCurve: BABYLON.Curve3): Promise<void> {
 
 | Babylon 8.x 규칙 | Loading Protocol 대응 |
 |------------------|----------------------|
-| Dynamic Mesh는 Pipeline에서 탈락 가능 | BARRIER에서 active mesh 검증 |
+| Dynamic Mesh는 Pipeline에서 탈락 가능 | BARRIER에서 Evidence 기반 검증 |
 | Material not ready → 즉시 탈락 | WARMING에서 `forceCompilationAsync` |
 | UtilityLayer 필수 (Effect용) | MaterialWarmupHelper가 UtilityScene 사용 |
 | 첫 프레임 검증 필수 | `RenderReadyBarrier.waitForFirstFrame()` |
+| LinesMesh는 activeMeshes 제외 | `RENDER_READY` evidence 사용 |
 
 ---
 
 ## 체크리스트
 
 ### 새 Scene 추가 시
-- [ ] `{Scene}DataLoader` 생성 (FETCHING 담당)
-- [ ] Scene 내 startAsync에서 Phase별 조율
-- [ ] MaterialWarmupHelper에 Scene 전용 warmup 메서드 추가
-- [ ] RenderReadyBarrier 검증 조건 정의 (requiredMeshNames 등)
+- [ ] LoadUnit들 생성 (Phase별)
+- [ ] MaterialWarmupUnit 설정
+- [ ] RenderReadyBarrierUnit 설정 (적절한 evidence 선택)
+- [ ] ArcanaLoadingOrchestrator로 조율
 - [ ] docs/loading_protocol.md 업데이트
+
+### Barrier Evidence 선택 가이드
+- [ ] 일반 Mesh → `ACTIVE_MESH`
+- [ ] 즉시 보여야 하는 LinesMesh → `VISIBLE_MESH`
+- [ ] fade-in 애니메이션 있는 Mesh → `RENDER_READY`
+- [ ] 특수 조건 → `CUSTOM` with predicate
 
 ### 로딩 이슈 디버깅 시
 1. Phase 로그 확인: `[{Scene}] Phase: {PHASE}`
 2. Barrier 로그 확인: `[RenderReadyBarrier] {SUCCESS|RETRY|FATAL}`
-3. Active mesh 수 확인
-4. Camera validation 결과 확인
+3. Evidence 타입 확인: `RENDER_READY` vs `VISIBLE_MESH`
+4. **visibility = 0 실패 시**: `VISIBLE_MESH` → `RENDER_READY`로 변경
+
+---
+
+## 변경 이력
+
+| 날짜 | 변경 내용 |
+|------|----------|
+| 2026-01-11 | Arcana Evidence Model 도입 (Constitutional Redesign) |
+| | - `RENDER_READY` evidence type 추가 |
+| | - visibility = 0 허용 (intentional fade-in) |
+| | - TacticalGrid barrier 수정 |
