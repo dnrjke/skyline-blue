@@ -47,13 +47,21 @@ export class InputLifecycleManager {
         }
 
         // 2. Scene input attachment (MUST be deferred to after first render)
+        // Gate conditions: activeCamera + _inputManager must exist
         const inputManager = (scene as any)._inputManager;
         if (!inputManager && !this.sceneAttachPending) {
             this.sceneAttachPending = true;
             scene.onAfterRenderObservable.addOnce(() => {
-                scene.attachControl();
+                if (!scene.activeCamera) {
+                    console.error('[InputLifecycle] No activeCamera, cannot attach input');
+                    this.sceneAttachPending = false;
+                    return;
+                }
+
+                // attachControl(true) - canvas is auto-inferred from engine
+                scene.attachControl(true);
                 this.sceneAttachPending = false;
-                console.info('[InputLifecycle] Scene control attached (post-render)');
+                console.info('[InputLifecycle] Scene attached to input (camera ready)');
             });
             console.info('[InputLifecycle] Scene attach scheduled for post-render');
         }
