@@ -46,28 +46,42 @@ export class MobileDebugConsole {
         };
 
         // Root container
+        // HEBS: root must allow hit-test propagation to children
+        // isHitTestVisible = true but isPointerBlocker = false allows click-through
+        // while children with isPointerBlocker = true can still receive input
         this.root = new GUI.Rectangle('MobileDebugConsoleRoot');
         this.root.width = '100%';
         this.root.height = '100%';
         this.root.thickness = 0;
         this.root.zIndex = Z_INDEX.SKIP + 50; // Above other skip layer elements
-        this.root.isHitTestVisible = false;
+        this.root.isHitTestVisible = true;
+        this.root.isPointerBlocker = false; // Allow click-through to lower layers
         this.root.isVisible = true;
 
         // Toggle Button (top center - 12 o'clock position)
+        // Size matches Skip button (LAYOUT.STORY_CONTROLS.SKIP_SIZE = 96px)
+        // Ensures reliable hit-testing across DPI/zoom variations
         this.toggleButton = GUI.Button.CreateSimpleButton('DebugToggle', 'DBG');
-        this.toggleButton.widthInPixels = 56;
-        this.toggleButton.heightInPixels = 28;
-        this.toggleButton.cornerRadius = 4;
-        this.toggleButton.thickness = 1;
-        this.toggleButton.color = 'rgba(255,255,255,0.6)';
-        this.toggleButton.background = 'rgba(0,0,0,0.5)';
+        this.toggleButton.widthInPixels = LAYOUT.STORY_CONTROLS.SKIP_SIZE;
+        this.toggleButton.heightInPixels = LAYOUT.STORY_CONTROLS.SKIP_SIZE;
+        this.toggleButton.cornerRadius = LAYOUT.STORY_CONTROLS.SKIP_SIZE / 2; // circular
+        this.toggleButton.thickness = 2;
+        this.toggleButton.color = COLORS.SYSTEM_BTN_BORDER;
+        this.toggleButton.background = COLORS.SYSTEM_BTN_BG;
         this.toggleButton.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
         this.toggleButton.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
-        this.toggleButton.topInPixels = LAYOUT.SAFE_AREA.TOP + 8;
+        this.toggleButton.topInPixels = LAYOUT.SAFE_AREA.TOP + LAYOUT.STORY_CONTROLS.TOP_OFFSET;
         this.toggleButton.isHitTestVisible = true;
         this.toggleButton.isPointerBlocker = true;
         this.toggleButton.onPointerClickObservable.add(() => {
+            // DIAGNOSTIC: Log pointer reception with full context
+            console.debug('[Input] Pointer received', {
+                source: 'DebugButton',
+                isEnabled: this.toggleButton.isEnabled,
+                isVisible: this.toggleButton.isVisible,
+                isOpen: this.isOpen,
+                action: 'toggle()',
+            });
             this.toggle();
         });
 
@@ -75,23 +89,26 @@ export class MobileDebugConsole {
         const btnText = this.toggleButton.textBlock;
         if (btnText) {
             btnText.fontFamily = FONT.FAMILY.MONOSPACE;
-            btnText.fontSizeInPixels = 12;
-            btnText.color = 'rgba(255,255,255,0.8)';
+            btnText.fontSizeInPixels = 20;
+            btnText.fontWeight = FONT.WEIGHT.BOLD;
+            btnText.color = COLORS.TEXT_WHITE;
         }
 
         this.root.addControl(this.toggleButton);
 
         // Console Panel (hidden by default)
+        // Positioned below the toggle button
+        const panelTop = LAYOUT.SAFE_AREA.TOP + LAYOUT.STORY_CONTROLS.TOP_OFFSET + LAYOUT.STORY_CONTROLS.SKIP_SIZE + 12;
         this.consolePanel = new GUI.Rectangle('DebugConsolePanel');
         this.consolePanel.widthInPixels = 360;
         this.consolePanel.heightInPixels = 400;
         this.consolePanel.thickness = 2;
         this.consolePanel.cornerRadius = 8;
-        this.consolePanel.color = 'rgba(0,255,200,0.4)';
+        this.consolePanel.color = COLORS.HUD_NEON;
         this.consolePanel.background = 'rgba(0,0,0,0.92)';
         this.consolePanel.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
         this.consolePanel.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
-        this.consolePanel.topInPixels = LAYOUT.SAFE_AREA.TOP + 44;
+        this.consolePanel.topInPixels = panelTop;
         this.consolePanel.isVisible = false;
         this.consolePanel.isHitTestVisible = true;
         this.consolePanel.isPointerBlocker = true;
@@ -314,13 +331,15 @@ export class MobileDebugConsole {
     show(): void {
         this.isOpen = true;
         this.consolePanel.isVisible = true;
-        this.toggleButton.background = 'rgba(0,200,150,0.6)';
+        this.toggleButton.background = COLORS.SYSTEM_BTN_BG_ACTIVE;
+        this.toggleButton.color = COLORS.SYSTEM_ACCENT;
     }
 
     hide(): void {
         this.isOpen = false;
         this.consolePanel.isVisible = false;
-        this.toggleButton.background = 'rgba(0,0,0,0.5)';
+        this.toggleButton.background = COLORS.SYSTEM_BTN_BG;
+        this.toggleButton.color = COLORS.SYSTEM_BTN_BORDER;
     }
 
     clear(): void {
@@ -331,6 +350,37 @@ export class MobileDebugConsole {
             this.logContainer.removeControl(child);
             child.dispose();
         }
+    }
+
+    /**
+     * INPUT INVARIANT:
+     * - InteractionLayer is the sole gameplay input surface.
+     * - System UI (Debug, Console) must never block phase-critical input.
+     * - Splash phase may ignore input, but must not expose interactive UI.
+     */
+
+    /**
+     * Set visibility of the entire debug console (button + panel).
+     * Use this to hide during splash/touchToStart phases.
+     */
+    setVisible(visible: boolean): void {
+        this.root.isVisible = visible;
+        if (!visible) {
+            // Also close the panel when hiding
+            this.isOpen = false;
+            this.consolePanel.isVisible = false;
+        }
+    }
+
+    /**
+     * Set whether the debug button blocks pointer events.
+     * Must be false during splash/touchToStart to allow InteractionLayer input.
+     */
+    setPointerBlocker(enabled: boolean): void {
+        this.toggleButton.isPointerBlocker = enabled;
+        this.toggleButton.isHitTestVisible = enabled;
+        this.consolePanel.isPointerBlocker = enabled;
+        this.consolePanel.isHitTestVisible = enabled;
     }
 
     dispose(): void {

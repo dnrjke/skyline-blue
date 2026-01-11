@@ -157,6 +157,7 @@ class Main {
             bottomVignetteLayer: this.bottomVignetteLayer,
             characterLayer: this.characterLayer,
             transitions: this.transitions,
+            debugConsole: this.debugConsole,
         });
         this.flow.start();
     }
