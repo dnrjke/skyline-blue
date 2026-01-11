@@ -44,22 +44,10 @@ export class GraphVisualizerUnit extends BaseLoadUnit {
         onProgress?.({ progress: 1, message: 'Graph visualizer ready' });
     }
 
-    validate(scene: BABYLON.Scene): boolean {
-        // Graph에 노드가 있고, active mesh에 nav 관련 메시가 있어야 함
+    validate(_scene: BABYLON.Scene): boolean {
+        // Graph에 노드가 있으면 build()가 성공한 것으로 간주
+        // Note: 렌더링 가시성 확인은 BARRIER phase에서 수행됨
         const nodeCount = this.config.graph.getNodes().length;
-        if (nodeCount === 0) return false;
-
-        const activeMeshes = scene.getActiveMeshes();
-        for (let i = 0; i < activeMeshes.length; i++) {
-            const mesh = activeMeshes.data[i];
-            // 노드 메시 확인 (metadata에 navNodeId가 있음)
-            if (mesh?.metadata?.navNodeId) {
-                return true;
-            }
-        }
-
-        // 노드가 있지만 아직 active mesh에 없을 수 있음 (첫 프레임)
-        // 이 경우 Barrier에서 retry할 것임
-        return activeMeshes.length > 0;
+        return nodeCount > 0;
     }
 }

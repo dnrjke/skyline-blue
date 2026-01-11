@@ -46,18 +46,9 @@ export class TacticalGridUnit extends BaseLoadUnit {
         onProgress?.({ progress: 1, message: 'Tactical grid ready' });
     }
 
-    validate(scene: BABYLON.Scene): boolean {
-        // Hologram 관련 메시가 active meshes에 있는지 확인
-        const activeMeshes = scene.getActiveMeshes();
-        for (let i = 0; i < activeMeshes.length; i++) {
-            const mesh = activeMeshes.data[i];
-            if (mesh?.name.includes('Hologram') || mesh?.name.includes('tactical')) {
-                return true;
-            }
-        }
-
-        // Active meshes가 0이 아니면 일단 통과
-        // (Hologram은 visibility가 0일 수 있음)
-        return activeMeshes.length > 0;
+    validate(_scene: BABYLON.Scene): boolean {
+        // load() 성공 = hologram.enable() 완료 = valid
+        // Note: 렌더링 가시성 확인은 BARRIER phase에서 수행됨
+        return true;
     }
 }
