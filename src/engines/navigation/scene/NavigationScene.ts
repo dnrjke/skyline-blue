@@ -12,6 +12,7 @@ import { NavigationCameraController } from './NavigationCameraController';
 import { LAYOUT } from '../../../shared/design';
 import { NavigationLinkNetwork } from '../visualization/NavigationLinkNetwork';
 import type { NavigationStartHooks } from '../NavigationEngine';
+import { InputLifecycleManager } from '../../../core/input/InputLifecycleManager';
 
 // LoadUnit-based Loading Architecture
 import {
@@ -216,6 +217,10 @@ export class NavigationScene {
         const hooks = this.startHooks;
         const dbg = hooks?.dbg;
         const startTime = performance.now();
+
+        // INPUT LAW: Ensure engine input is attached at flow entry
+        const engine = this.scene.getEngine();
+        InputLifecycleManager.ensureAttached(engine, this.scene);
 
         try {
             // === Reset previous run state ===

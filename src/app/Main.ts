@@ -33,6 +33,7 @@ import { FlowController } from './FlowController';
 import { RenderQualityManager } from '../core/rendering/RenderQualityManager';
 import { ArcanaLoadingEngine } from '../shared/ui/ArcanaLoadingEngine';
 import { StageTransitionManager } from '../core/scene/StageTransitionManager';
+import { InputLifecycleManager } from '../core/input/InputLifecycleManager';
 
 // ============================================
 // Main Application
@@ -130,6 +131,9 @@ class Main {
         });
 
         // Resize/DPI handling is owned by RenderQualityManager (Phase 2.6)
+
+        // INPUT LAW: Ensure engine input is attached before any flow starts
+        InputLifecycleManager.ensureAttached(this.engine, this.scene);
 
         // Start render loop
         this.engine.runRenderLoop(() => {
