@@ -4,21 +4,19 @@
  * Babylon.js 8.x의 렌더링 특성을 반영한 로딩 프로토콜.
  * "엔진 기준 로딩"을 강제하여 false-ready 상태를 방지한다.
  *
- * ## 아키텍처
+ * [TacticalGrid Incident Prevention - Constitutional Amendment]
  *
- * ### 1. LoadUnit 기반 (권장)
- * ```typescript
- * const registry = new LoadingRegistry();
- * registry.registerAll([...units]);
- * const protocol = new LoadingProtocol(scene, registry);
- * await protocol.execute({ ... });
- * ```
+ * Loading Phases (Final Form):
+ *   PENDING → FETCHING → BUILDING → WARMING → BARRIER
+ *          → VISUAL_READY → STABILIZING_100 → READY
  *
- * ### 2. Legacy: BaseSceneLoader 기반
- * 기존 코드와의 호환성을 위해 유지됨.
+ * Key Rules:
+ * - 100% does NOT mean "done". It means "safe to transition".
+ * - BARRIER only confirms render loop, NOT visual readiness.
+ * - VISUAL_READY verifies actual user-visible visuals.
+ * - STABILIZING_100 holds at 100% for stability guarantee.
  *
  * @see docs/loading_protocol.md
- * @see docs/babylon_rendering_rules.md
  */
 
 // ========================================
@@ -45,10 +43,29 @@ export type { MaterialWarmupConfig, MaterialFactory as UnitMaterialFactory } fro
 export { RenderReadyBarrierUnit } from './unit/RenderReadyBarrierUnit';
 export type { BarrierUnitConfig } from './unit/RenderReadyBarrierUnit';
 
+// Visual Ready Unit (TacticalGrid Incident Prevention)
+export {
+    VisualReadyUnit,
+    createMeshVisualRequirement,
+    createCustomVisualRequirement,
+    createTacticalGridVisualRequirement,
+} from './unit/VisualReadyUnit';
+export type {
+    VisualRequirement,
+    VisualValidationResult,
+    VisualReadyUnitConfig,
+} from './unit/VisualReadyUnit';
+
 // ========================================
 // Protocol (공통)
 // ========================================
-export { LoadingPhase, PHASE_ORDER, isTerminalPhase, isLoadingPhase } from './protocol/LoadingPhase';
+export {
+    LoadingPhase,
+    PHASE_ORDER,
+    isTerminalPhase,
+    isLoadingPhase,
+    isTransitionBlocked,
+} from './protocol/LoadingPhase';
 export type { LoadingResult, LoadingCallbacks, PhaseTimingRecord } from './protocol/LoadingResult';
 export { createSuccessResult, createFailureResult } from './protocol/LoadingResult';
 
@@ -71,6 +88,7 @@ export {
     ArcanaProgressModel,
     PROGRESS_BOUNDS,
     COMPRESSION_SETTINGS,
+    STABILIZATION_SETTINGS,
 } from './progress/ArcanaProgressModel';
 export type {
     ProgressSnapshot,
