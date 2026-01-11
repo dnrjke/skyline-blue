@@ -16,14 +16,28 @@
 import * as BABYLON from '@babylonjs/core';
 import { LoadUnit, LoadUnitStatus, LoadUnitProgress } from './LoadUnit';
 import { LoadingPhase } from '../protocol/LoadingPhase';
-import { RenderReadyBarrier, BarrierValidation } from '../barrier/RenderReadyBarrier';
+import {
+    RenderReadyBarrier,
+    BarrierValidation,
+    BarrierRequirement,
+} from '../barrier/RenderReadyBarrier';
 
 /**
  * RenderReadyBarrierUnit configuration
  */
 export interface BarrierUnitConfig {
-    /** Required mesh names (must be in active meshes) */
+    /** Required mesh names (must be in active meshes) - 레거시 지원 */
     requiredMeshNames?: string[];
+
+    /**
+     * 필수 요구사항 (새로운 증거 기반 검증)
+     *
+     * 각 요구사항은 evidence 유형에 따라 다르게 검증됨:
+     * - ACTIVE_MESH: Babylon activeMeshes에 포함
+     * - VISIBLE_MESH: 커스텀 가시성 검증 (LinesMesh 등)
+     * - CUSTOM: 완전 커스텀 predicate
+     */
+    requirements?: BarrierRequirement[];
 
     /** Minimum active mesh count (default: 1) */
     minActiveMeshCount?: number;
@@ -90,6 +104,7 @@ export class RenderReadyBarrierUnit implements LoadUnit {
 
         const validation: BarrierValidation = {
             requiredMeshNames: this.config.requiredMeshNames,
+            requirements: this.config.requirements,
             minActiveMeshCount: this.config.minActiveMeshCount ?? 1,
             maxRetryFrames: this.config.maxRetryFrames ?? 15,
             requireCameraRender: this.config.requireCameraRender ?? true,

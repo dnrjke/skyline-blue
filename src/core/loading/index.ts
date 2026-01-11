@@ -56,7 +56,7 @@ export { createSuccessResult, createFailureResult } from './protocol/LoadingResu
 // Barrier (공통)
 // ========================================
 export { RenderReadyBarrier, BarrierResult } from './barrier/RenderReadyBarrier';
-export type { BarrierValidation } from './barrier/RenderReadyBarrier';
+export type { BarrierValidation, BarrierEvidence, BarrierRequirement } from './barrier/RenderReadyBarrier';
 
 // ========================================
 // Legacy: BaseSceneLoader (호환성 유지)

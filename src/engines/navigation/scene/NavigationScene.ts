@@ -19,6 +19,7 @@ import {
     ArcanaLoadingOrchestrator,
     MaterialWarmupUnit,
     RenderReadyBarrierUnit,
+    BarrierRequirement,
 } from '../../../core/loading';
 import {
     DataFetchUnit,
@@ -291,8 +292,14 @@ export class NavigationScene {
                 MaterialWarmupUnit.createNavigationWarmupUnit(),
 
                 // BARRIER phase - 렌더링 가시성 검증 (첫 프레임에 필수 메시들이 렌더됐는가)
+                // TacticalGrid는 LinesMesh라서 activeMeshes에 안 들어감 → VISIBLE_MESH 증거 사용
                 RenderReadyBarrierUnit.createForNavigation({
-                    requiredMeshNames: [this.hologram.getGridMeshName()],
+                    requirements: [
+                        {
+                            id: this.hologram.getGridMeshName(),
+                            evidence: 'VISIBLE_MESH',
+                        } as BarrierRequirement,
+                    ],
                 }),
             ]);
 
