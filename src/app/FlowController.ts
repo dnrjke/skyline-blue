@@ -3,6 +3,7 @@ import * as GUI from '@babylonjs/gui';
 import type { BackgroundLayer } from '../shared/ui/BackgroundLayer';
 import type { BottomVignetteLayer } from '../shared/ui/BottomVignetteLayer';
 import type { CharacterLayer } from '../shared/ui/CharacterLayer';
+import type { MobileDebugConsole } from '../shared/ui/MobileDebugConsole';
 import { COLORS } from '../shared/design';
 import type { NarrativeEngine } from '../engines/narrative';
 import type { SplashScene } from '../ui/startScreens/splash/SplashScene';
@@ -25,6 +26,7 @@ export interface FlowControllerDeps {
     backgroundLayer: BackgroundLayer;
     bottomVignetteLayer: BottomVignetteLayer;
     characterLayer: CharacterLayer;
+    debugConsole: MobileDebugConsole;
 }
 
 /**
@@ -44,6 +46,7 @@ export class FlowController {
     private backgroundLayer: BackgroundLayer;
     private bottomVignetteLayer: BottomVignetteLayer;
     private characterLayer: CharacterLayer;
+    private debugConsole: MobileDebugConsole;
 
     private currentFlow: FlowState = 'splash';
     private inputCooldownTimer: number | null = null;
@@ -65,6 +68,7 @@ export class FlowController {
         this.backgroundLayer = deps.backgroundLayer;
         this.bottomVignetteLayer = deps.bottomVignetteLayer;
         this.characterLayer = deps.characterLayer;
+        this.debugConsole = deps.debugConsole;
     }
 
     start(): void {
@@ -94,10 +98,23 @@ export class FlowController {
         }
     }
 
+    /**
+     * INPUT INVARIANT:
+     * - InteractionLayer is the sole gameplay input surface.
+     * - System UI (Debug, Console) must never block phase-critical input.
+     * - Splash phase may ignore input, but must not expose interactive UI.
+     */
     private startFlow(flow: FlowState): void {
         const previousFlow = this.currentFlow;
         this.currentFlow = flow;
         console.log(`[System] Flow: ${previousFlow} → ${flow}`);
+
+        // Debug Console visibility policy:
+        // - Splash / TouchToStart: HIDDEN (must not block phase-critical input)
+        // - Narrative / Navigation / Complete: VISIBLE (allowed to block)
+        const shouldShowDebug = flow !== 'splash' && flow !== 'touchToStart';
+        this.debugConsole.setVisible(shouldShowDebug);
+        this.debugConsole.setPointerBlocker(shouldShowDebug);
 
         // Navigation 전환은 로딩 오버레이(페이드아웃 포함) 종료 시점에 맞춰
         // 입력을 명시적으로 복구해야 한다.

@@ -352,6 +352,37 @@ export class MobileDebugConsole {
         }
     }
 
+    /**
+     * INPUT INVARIANT:
+     * - InteractionLayer is the sole gameplay input surface.
+     * - System UI (Debug, Console) must never block phase-critical input.
+     * - Splash phase may ignore input, but must not expose interactive UI.
+     */
+
+    /**
+     * Set visibility of the entire debug console (button + panel).
+     * Use this to hide during splash/touchToStart phases.
+     */
+    setVisible(visible: boolean): void {
+        this.root.isVisible = visible;
+        if (!visible) {
+            // Also close the panel when hiding
+            this.isOpen = false;
+            this.consolePanel.isVisible = false;
+        }
+    }
+
+    /**
+     * Set whether the debug button blocks pointer events.
+     * Must be false during splash/touchToStart to allow InteractionLayer input.
+     */
+    setPointerBlocker(enabled: boolean): void {
+        this.toggleButton.isPointerBlocker = enabled;
+        this.toggleButton.isHitTestVisible = enabled;
+        this.consolePanel.isPointerBlocker = enabled;
+        this.consolePanel.isHitTestVisible = enabled;
+    }
+
     dispose(): void {
         // Restore original console methods
         console.log = this.originalConsole.log;
