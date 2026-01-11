@@ -46,12 +46,16 @@ export class MobileDebugConsole {
         };
 
         // Root container
+        // HEBS: root must allow hit-test propagation to children
+        // isHitTestVisible = true but isPointerBlocker = false allows click-through
+        // while children with isPointerBlocker = true can still receive input
         this.root = new GUI.Rectangle('MobileDebugConsoleRoot');
         this.root.width = '100%';
         this.root.height = '100%';
         this.root.thickness = 0;
         this.root.zIndex = Z_INDEX.SKIP + 50; // Above other skip layer elements
-        this.root.isHitTestVisible = false;
+        this.root.isHitTestVisible = true;
+        this.root.isPointerBlocker = false; // Allow click-through to lower layers
         this.root.isVisible = true;
 
         // Toggle Button (top center - 12 o'clock position)
