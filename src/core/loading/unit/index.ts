@@ -37,5 +37,9 @@ export type { ProtocolOptions, ProtocolResult } from './LoadingProtocol';
 export { MaterialWarmupUnit } from './MaterialWarmupUnit';
 export type { MaterialWarmupConfig, MaterialFactory } from './MaterialWarmupUnit';
 
+// Barrier Unit
+export { RenderReadyBarrierUnit } from './RenderReadyBarrierUnit';
+export type { BarrierUnitConfig } from './RenderReadyBarrierUnit';
+
 // Re-export LoadingPhase from protocol module
 export { LoadingPhase, PHASE_ORDER, isTerminalPhase, isLoadingPhase } from '../protocol/LoadingPhase';

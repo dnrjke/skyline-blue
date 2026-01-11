@@ -41,6 +41,10 @@ export type { ProtocolOptions, ProtocolResult } from './unit/LoadingProtocol';
 export { MaterialWarmupUnit } from './unit/MaterialWarmupUnit';
 export type { MaterialWarmupConfig, MaterialFactory as UnitMaterialFactory } from './unit/MaterialWarmupUnit';
 
+// Barrier Unit
+export { RenderReadyBarrierUnit } from './unit/RenderReadyBarrierUnit';
+export type { BarrierUnitConfig } from './unit/RenderReadyBarrierUnit';
+
 // ========================================
 // Protocol (공통)
 // ========================================
@@ -60,6 +64,37 @@ export type { BarrierValidation } from './barrier/RenderReadyBarrier';
 export type { SceneLoaderProtocol, PhaseWork } from './protocol/SceneLoaderProtocol';
 export { BaseSceneLoader } from './protocol/SceneLoaderProtocol';
 
-// Legacy: MaterialWarmupHelper
+// ========================================
+// Progress Model (Arcana)
+// ========================================
+export {
+    ArcanaProgressModel,
+    PROGRESS_BOUNDS,
+    COMPRESSION_SETTINGS,
+} from './progress/ArcanaProgressModel';
+export type {
+    ProgressSnapshot,
+    ProgressEvent,
+    ProgressEventType,
+    ProgressEventListener,
+    UnitWeightConfig,
+} from './progress/ArcanaProgressModel';
+
+export {
+    LoadingStateEmitter,
+    getGlobalLoadingEmitter,
+    disposeGlobalLoadingEmitter,
+} from './progress/LoadingStateEmitter';
+export type { LoadingState, LoadingEvents } from './progress/LoadingStateEmitter';
+
+// ========================================
+// Orchestrator (High-level)
+// ========================================
+export { ArcanaLoadingOrchestrator } from './orchestrator/ArcanaLoadingOrchestrator';
+export type { OrchestratorConfig, OrchestratorCallbacks } from './orchestrator/ArcanaLoadingOrchestrator';
+
+// ========================================
+// Legacy: MaterialWarmupHelper (호환성)
+// ========================================
 export { MaterialWarmupHelper } from './warmup/MaterialWarmupHelper';
 export type { MaterialFactory, WarmupConfig } from './warmup/MaterialWarmupHelper';
