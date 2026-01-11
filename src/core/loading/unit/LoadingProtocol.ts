@@ -1,10 +1,16 @@
 /**
  * LoadingProtocol - LoadUnit 기반 로딩 오케스트레이션.
  *
- * 역할:
- * - Registry에 등록된 LoadUnit들을 Phase 순서대로 실행
- * - BARRIER phase에서 첫 프레임 렌더 검증 수행
- * - 모든 Required Unit이 VALIDATED 상태가 되어야 READY
+ * [TacticalGrid Incident Prevention - Constitutional Amendment]
+ *
+ * Phase Flow (Final Form):
+ *   FETCHING → BUILDING → WARMING → BARRIER
+ *           → VISUAL_READY → STABILIZING_100 → READY
+ *
+ * Key Rules:
+ * - BARRIER → READY 직접 전이 금지
+ * - VISUAL_READY에서 실제 시각 요소 검증
+ * - STABILIZING_100에서 안정화 홀드
  *
  * 사용법:
  * ```typescript
@@ -28,6 +34,7 @@ import { LoadUnit, LoadUnitStatus } from './LoadUnit';
 import { LoadingRegistry } from './LoadingRegistry';
 import { LoadingPhase } from '../protocol/LoadingPhase';
 import { RenderReadyBarrier, BarrierValidation } from '../barrier/RenderReadyBarrier';
+import { STABILIZATION_SETTINGS } from '../progress/ArcanaProgressModel';
 
 /**
  * Protocol 실행 옵션
@@ -151,11 +158,28 @@ export class LoadingProtocol {
 
             this.checkCancelled();
 
-            // === BARRIER Phase (첫 프레임 렌더 검증) ===
+            // === BARRIER Phase (렌더 루프 확인만 - 시각 검증은 VISUAL_READY에서) ===
             setPhase(LoadingPhase.BARRIER);
             const barrierStart = performance.now();
             await this.executeBarrierPhase(options);
             phaseTimes.set(LoadingPhase.BARRIER, performance.now() - barrierStart);
+
+            this.checkCancelled();
+
+            // === VISUAL_READY Phase (실제 시각 요소 검증) ===
+            // [Constitutional Amendment] BARRIER → READY 직접 전이 금지
+            setPhase(LoadingPhase.VISUAL_READY);
+            const visualReadyStart = performance.now();
+            await this.executeVisualReadyPhase(options);
+            phaseTimes.set(LoadingPhase.VISUAL_READY, performance.now() - visualReadyStart);
+
+            this.checkCancelled();
+
+            // === STABILIZING_100 Phase (안정화 홀드) ===
+            setPhase(LoadingPhase.STABILIZING_100);
+            const stabilizingStart = performance.now();
+            await this.executeStabilizationPhase(options);
+            phaseTimes.set(LoadingPhase.STABILIZING_100, performance.now() - stabilizingStart);
 
             // === READY ===
             setPhase(LoadingPhase.READY);
@@ -308,6 +332,134 @@ export class LoadingProtocol {
         }
 
         options.onProgress?.(0.95);
+    }
+
+    /**
+     * VISUAL_READY phase 실행 - 실제 시각 요소 검증
+     *
+     * [TacticalGrid Incident Prevention]
+     * BARRIER 이후 실제로 화면에 보이는지 검증하는 phase.
+     * VisualReadyUnit들이 등록되어 있어야 함.
+     *
+     * RULE: VISUAL_READY에 등록된 유닛이 0개면 경고 (에러는 아님 - 호환성)
+     */
+    private async executeVisualReadyPhase(options: ProtocolOptions): Promise<void> {
+        options.onLog?.('[VISUAL_READY] Visual verification phase...');
+
+        const visualReadyUnits = this.registry.getUnitsByPhase(LoadingPhase.VISUAL_READY);
+
+        if (visualReadyUnits.length === 0) {
+            // 경고만 출력 (완전한 에러는 기존 코드 호환성 때문에 피함)
+            console.warn(
+                '[LoadingProtocol] WARNING: No VisualReadyUnits registered. ' +
+                'This may cause TacticalGrid-class incidents. ' +
+                'Register VisualReadyUnit with visual requirements.'
+            );
+            options.onLog?.('[VISUAL_READY] No visual units registered (WARNING)');
+            return;
+        }
+
+        // Required visual units 검증
+        const requiredVisualUnits = visualReadyUnits.filter((u) => u.requiredForReady);
+
+        if (requiredVisualUnits.length === 0) {
+            console.warn(
+                '[LoadingProtocol] WARNING: No REQUIRED VisualReadyUnits. ' +
+                'Core visual elements should be required for validation.'
+            );
+        }
+
+        // Visual units 실행 (순차)
+        for (const unit of visualReadyUnits) {
+            this.checkCancelled();
+            options.onLog?.(`[VISUAL_READY] Verifying: ${unit.id}...`);
+
+            await unit.load(this.scene, (_unitProgress) => {
+                const overallProgress = this.registry.calculateProgress();
+                options.onProgress?.(Math.min(0.95, overallProgress));
+            });
+
+            options.onUnitStatusChange?.(unit, unit.status);
+
+            if (unit.requiredForReady && unit.status === LoadUnitStatus.FAILED) {
+                throw unit.error || new Error(`Visual verification failed: ${unit.id}`);
+            }
+
+            // Visual unit validate
+            if (unit.status === LoadUnitStatus.LOADED) {
+                const isValid = unit.validate?.(this.scene) ?? true;
+                if (isValid) {
+                    unit.status = LoadUnitStatus.VALIDATED;
+                    options.onLog?.(`[VISUAL_READY] ✓ ${unit.id} validated`);
+                } else if (unit.requiredForReady) {
+                    throw new Error(`Visual validation failed: ${unit.id}`);
+                }
+            }
+        }
+
+        options.onProgress?.(0.98);
+        options.onLog?.('[VISUAL_READY] Visual verification complete');
+    }
+
+    /**
+     * STABILIZING_100 phase 실행 - 안정화 홀드
+     *
+     * [TacticalGrid Incident Prevention]
+     * 100%에서 안정화 대기. 목적:
+     * - 첫 프레임 떨림 제거
+     * - GPU spike 흡수
+     * - 시각 요소가 '보인 채로 유지되는지' 확인
+     *
+     * MIN_TIME_MS OR MIN_STABLE_FRAMES 중 하나라도 충족 전엔 READY 불가
+     */
+    private async executeStabilizationPhase(options: ProtocolOptions): Promise<void> {
+        options.onLog?.('[STABILIZING_100] Stability hold phase...');
+
+        const startTime = performance.now();
+        let frameCount = 0;
+
+        const { MIN_TIME_MS, MIN_STABLE_FRAMES, MAX_TIME_MS } = STABILIZATION_SETTINGS;
+
+        return new Promise<void>((resolve, reject) => {
+            const checkStability = () => {
+                try {
+                    this.checkCancelled();
+
+                    frameCount++;
+                    const elapsed = performance.now() - startTime;
+
+                    // 완료 조건 체크
+                    const timeOk = elapsed >= MIN_TIME_MS;
+                    const framesOk = frameCount >= MIN_STABLE_FRAMES;
+                    const maxTimeReached = elapsed >= MAX_TIME_MS;
+
+                    if ((timeOk && framesOk) || maxTimeReached) {
+                        if (maxTimeReached && !(timeOk && framesOk)) {
+                            console.warn(
+                                `[LoadingProtocol] Stabilization max time reached (fail-safe): ` +
+                                `${elapsed.toFixed(0)}ms, ${frameCount} frames`
+                            );
+                        } else {
+                            options.onLog?.(
+                                `[STABILIZING_100] Complete: ${elapsed.toFixed(0)}ms, ${frameCount} frames`
+                            );
+                        }
+
+                        options.onProgress?.(1.0);
+                        resolve();
+                        return;
+                    }
+
+                    // 다음 프레임에서 재검사
+                    this.scene.onAfterRenderObservable.addOnce(checkStability);
+                } catch (err) {
+                    reject(err);
+                }
+            };
+
+            // 첫 프레임부터 시작
+            this.scene.onAfterRenderObservable.addOnce(checkStability);
+        });
     }
 
     /**
