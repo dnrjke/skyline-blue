@@ -47,8 +47,8 @@ export class TacticalGridUnit extends BaseLoadUnit {
     }
 
     validate(_scene: BABYLON.Scene): boolean {
-        // load() 성공 = hologram.enable() 완료 = valid
-        // Note: 렌더링 가시성 확인은 BARRIER phase에서 수행됨
-        return true;
+        // Phase 검증 원칙: BUILDING phase는 "생성되었는가"만 확인
+        // 렌더링 가시성(active meshes)은 BARRIER phase에서 수행됨
+        return this.config.hologram.isCreated();
     }
 }

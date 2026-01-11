@@ -290,8 +290,10 @@ export class NavigationScene {
                 // WARMING phase
                 MaterialWarmupUnit.createNavigationWarmupUnit(),
 
-                // BARRIER phase
-                RenderReadyBarrierUnit.createForNavigation(),
+                // BARRIER phase - 렌더링 가시성 검증 (첫 프레임에 필수 메시들이 렌더됐는가)
+                RenderReadyBarrierUnit.createForNavigation({
+                    requiredMeshNames: [this.hologram.getGridMeshName()],
+                }),
             ]);
 
             // Attach environment after FETCHING phase (before BUILDING)
