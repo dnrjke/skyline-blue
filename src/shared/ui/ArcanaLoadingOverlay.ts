@@ -65,7 +65,7 @@ export class ArcanaLoadingOverlay {
         this.titleText.fontFamily = FONT.FAMILY.TITLE;
         this.titleText.fontSizeInPixels = 46;
         this.titleText.color = COLORS.TEXT_WHITE;
-        this.titleText.heightInPixels = 60;
+        this.titleText.heightInPixels = 70;
         this.titleText.width = '100%';
         this.titleText.textHorizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
         this.titleText.textVerticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
@@ -77,9 +77,9 @@ export class ArcanaLoadingOverlay {
         this.subtitleText.fontFamily = FONT.FAMILY.BODY;
         this.subtitleText.fontSizeInPixels = 22;
         this.subtitleText.color = COLORS.TEXT_SUBTITLE;
-        this.subtitleText.heightInPixels = 36;
+        this.subtitleText.heightInPixels = 40;
         this.subtitleText.width = '100%';
-        this.subtitleText.topInPixels = 64;
+        this.subtitleText.topInPixels = 62;
         this.subtitleText.textHorizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
         this.subtitleText.textVerticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
         this.subtitleText.isHitTestVisible = false;
@@ -102,24 +102,24 @@ export class ArcanaLoadingOverlay {
         this.tipText.isHitTestVisible = false;
         this.safeArea.addControl(this.tipText);
 
-        // Bottom progress bar (positioned at bottom)
+        // Bottom progress bar
         this.barOuter = new GUI.Rectangle('ArcanaLoadingBarOuter');
         this.barOuter.width = '100%';
-        this.barOuter.heightInPixels = 16;
+        this.barOuter.heightInPixels = 18;
         this.barOuter.thickness = 2;
-        this.barOuter.cornerRadius = 8;
+        this.barOuter.cornerRadius = 10;
         this.barOuter.color = COLORS.HUD_NEON;
         this.barOuter.background = 'rgba(0,0,0,0.35)';
         this.barOuter.isHitTestVisible = false;
         this.barOuter.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_BOTTOM;
-        this.barOuter.topInPixels = -20;
+        this.barOuter.topInPixels = -56;
         this.safeArea.addControl(this.barOuter);
 
         this.barFill = new GUI.Rectangle('ArcanaLoadingBarFill');
         this.barFill.width = '0%';
         this.barFill.height = '100%';
         this.barFill.thickness = 0;
-        this.barFill.cornerRadius = 8;
+        this.barFill.cornerRadius = 10;
         this.barFill.background = COLORS.HUD_NEON;
         this.barFill.isHitTestVisible = false;
         // Fill should grow from LEFT → RIGHT (not center-out)
@@ -127,20 +127,20 @@ export class ArcanaLoadingOverlay {
         this.barFill.leftInPixels = 0;
         this.barOuter.addControl(this.barFill);
 
-        // Debug lines (above progress bar with clear separation)
+        // Debug lines (bottom)
         this.debugText = new GUI.TextBlock('ArcanaLoadingDebug');
         this.debugText.text = '';
         this.debugText.fontFamily = FONT.FAMILY.MONOSPACE;
-        this.debugText.fontSizeInPixels = 16;
+        this.debugText.fontSizeInPixels = 18;
         this.debugText.color = 'rgba(255,255,255,0.72)';
         this.debugText.width = '100%';
-        this.debugText.heightInPixels = 140;
+        this.debugText.heightInPixels = 160;
         this.debugText.textWrapping = true;
-        this.debugText.lineSpacing = '4px';
+        this.debugText.lineSpacing = '6px';
         this.debugText.textHorizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
         this.debugText.textVerticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_BOTTOM;
         this.debugText.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_BOTTOM;
-        this.debugText.topInPixels = -48;
+        this.debugText.topInPixels = -76;
         this.debugText.isHitTestVisible = false;
         this.safeArea.addControl(this.debugText);
 
