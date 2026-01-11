@@ -144,7 +144,14 @@ export class FlowController {
         this.bottomVignetteLayer.hide();
 
         this.narrativeEngine.pushInputHandler('splash', () => {
-            // no-op (phase1 policy)
+            // DIAGNOSTIC: Splash input received but intentionally ignored (phase1 policy)
+            console.warn('[Input] Ignored by flow gate', {
+                phase: this.currentFlow,
+                expected: ['touchToStart', 'narrative'],
+                actual: this.currentFlow,
+                reason: 'SplashPhasePolicy',
+                note: 'Splash advances only via timer (splashScene.onComplete), not user input',
+            });
         });
 
         this.splashScene.start({
@@ -158,11 +165,21 @@ export class FlowController {
 
     private startTouchToStart(): void {
         console.log('[System] Starting Touch-to-Start...');
+        console.debug('[TouchToStart] Entered', {
+            phase: this.currentFlow,
+            inputEnabled: this.narrativeEngine.getState(),
+        });
         this.backgroundLayer.show();
         this.backgroundLayer.setColor(COLORS.BG_TITLE);
         this.bottomVignetteLayer.hide();
 
         this.narrativeEngine.pushInputHandler('touchToStart', () => {
+            // DIAGNOSTIC: Input received, triggering transition
+            console.info('[Flow] Transition requested', {
+                from: this.currentFlow,
+                to: 'narrative',
+                trigger: 'UserInput (touchToStart handler)',
+            });
             this.touchToStartScene.triggerStart();
         });
 

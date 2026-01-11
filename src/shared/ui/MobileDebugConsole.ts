@@ -74,6 +74,14 @@ export class MobileDebugConsole {
         this.toggleButton.isHitTestVisible = true;
         this.toggleButton.isPointerBlocker = true;
         this.toggleButton.onPointerClickObservable.add(() => {
+            // DIAGNOSTIC: Log pointer reception with full context
+            console.debug('[Input] Pointer received', {
+                source: 'DebugButton',
+                isEnabled: this.toggleButton.isEnabled,
+                isVisible: this.toggleButton.isVisible,
+                isOpen: this.isOpen,
+                action: 'toggle()',
+            });
             this.toggle();
         });
 
