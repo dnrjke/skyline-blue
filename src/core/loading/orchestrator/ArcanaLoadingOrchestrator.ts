@@ -223,10 +223,8 @@ export class ArcanaLoadingOrchestrator {
                 },
             });
 
-            // Ensure barrier is resolved on success
-            if (result.phase === LoadingPhase.READY) {
-                this.progressModel.resolveBarrier();
-            }
+            // Phase transitions now handled automatically by setPhase()
+            // No need for explicit barrier resolution - READY phase triggers launch
 
             this.isExecuting = false;
             return result;
