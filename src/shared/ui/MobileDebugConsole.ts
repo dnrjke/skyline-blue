@@ -73,9 +73,10 @@ export class MobileDebugConsole {
         this.toggleButton.topInPixels = LAYOUT.SAFE_AREA.TOP + LAYOUT.STORY_CONTROLS.TOP_OFFSET;
         this.toggleButton.isHitTestVisible = true;
         this.toggleButton.isPointerBlocker = true;
-        this.toggleButton.onPointerClickObservable.add(() => {
+        // Use onPointerDownObservable for more reliable mobile touch detection
+        this.toggleButton.onPointerDownObservable.add(() => {
             // DIAGNOSTIC: Log pointer reception with full context
-            console.debug('[Input] Pointer received', {
+            console.debug('[Input] PointerDown received', {
                 source: 'DebugButton',
                 isEnabled: this.toggleButton.isEnabled,
                 isVisible: this.toggleButton.isVisible,

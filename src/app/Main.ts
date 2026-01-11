@@ -136,6 +136,19 @@ class Main {
             this.scene.render();
         });
 
+        // INPUT DIAGNOSTIC: Check attachControl state
+        console.warn('[INPUT DIAG] Engine/Scene State', {
+            engineInputElement: this.engine.inputElement,
+            engineInputElementIsCanvas: this.engine.inputElement === this.canvas,
+            sceneAttached: (this.scene as any)._inputManager?._isAttached,
+            isReady: this.scene.isReady(),
+        });
+
+        // INPUT DIAGNOSTIC: Scene-level pointer test
+        this.scene.onPointerDown = () => {
+            console.log('[Scene] PointerDown received at scene level');
+        };
+
         console.log('[System] Initialization complete');
 
         // ========================================

@@ -101,6 +101,11 @@ export class GUIManager {
         });
 
         console.log('[GUIManager] HEBS layer hierarchy created');
+
+        // INPUT DIAGNOSTIC: Check if GUI texture receives any pointer events
+        this.texture.onControlPickedObservable.add((control) => {
+            console.log('[GUIManager] Control picked:', control.name);
+        });
     }
 
     private createLayer(name: string, zIndex: number): GUI.Rectangle {
