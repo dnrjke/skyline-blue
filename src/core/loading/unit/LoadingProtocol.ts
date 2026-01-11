@@ -234,47 +234,74 @@ export class LoadingProtocol {
 
     /**
      * BARRIER phase 실행 - 첫 프레임 렌더 검증
+     *
+     * Barrier LoadUnit은 requiredForReady이지만,
+     * "사전 validate 대상"이 아니라 "Barrier Phase에서 실행 후 자동 validate"된다.
      */
     private async executeBarrierPhase(options: ProtocolOptions): Promise<void> {
         options.onLog?.('[BARRIER] First frame render verification...');
 
-        // 1. RenderReadyBarrier로 첫 프레임 대기
-        const barrierValidation: BarrierValidation = {
-            minActiveMeshCount: 1,
-            maxRetryFrames: 15,
-            requireCameraRender: true,
-            ...options.barrierValidation,
-        };
+        // 1. Barrier 이전 phase의 required units만 검증 (BARRIER phase 제외)
+        const nonBarrierRequired = this.registry
+            .getRequiredUnits()
+            .filter((u) => u.phase !== LoadingPhase.BARRIER);
 
-        await this.barrier.waitForFirstFrame(barrierValidation);
-
-        // 2. 각 Required Unit의 validate() 호출
-        const requiredUnits = this.registry.getRequiredUnits();
-        const failedValidations: string[] = [];
-
-        for (const unit of requiredUnits) {
+        for (const unit of nonBarrierRequired) {
             if (unit.status !== LoadUnitStatus.LOADED) continue;
 
             const isValid = unit.validate?.(this.scene) ?? true;
 
             if (isValid) {
                 unit.status = LoadUnitStatus.VALIDATED;
-                if ('markValidated' in unit && typeof unit.markValidated === 'function') {
-                    (unit as any).markValidated();
-                }
             } else {
-                failedValidations.push(unit.id);
-                options.onLog?.(`[BARRIER] Validation failed: ${unit.id}`);
+                throw new Error(`Pre-barrier validation failed: ${unit.id}`);
             }
         }
 
-        if (failedValidations.length > 0) {
-            throw new Error(`Barrier validation failed for: ${failedValidations.join(', ')}`);
+        // 2. BARRIER phase units 실행 (RenderReadyBarrierUnit 등)
+        const barrierUnits = this.registry.getUnitsByPhase(LoadingPhase.BARRIER);
+
+        if (barrierUnits.length > 0) {
+            // Execute barrier units
+            for (const unit of barrierUnits) {
+                this.checkCancelled();
+                options.onLog?.(`[BARRIER] Executing: ${unit.id}...`);
+
+                await unit.load(this.scene, (_unitProgress) => {
+                    const overallProgress = this.registry.calculateProgress();
+                    options.onProgress?.(overallProgress);
+                });
+
+                options.onUnitStatusChange?.(unit, unit.status);
+
+                if (unit.status === LoadUnitStatus.FAILED) {
+                    throw unit.error || new Error(`Barrier unit ${unit.id} failed`);
+                }
+
+                // Barrier unit은 load() 성공 자체가 validate 의미
+                if (unit.status === LoadUnitStatus.LOADED) {
+                    const isValid = unit.validate?.(this.scene) ?? true;
+                    if (isValid) {
+                        unit.status = LoadUnitStatus.VALIDATED;
+                    }
+                }
+            }
+        } else {
+            // Fallback: 등록된 Barrier unit이 없으면 기존 방식 사용
+            const barrierValidation: BarrierValidation = {
+                minActiveMeshCount: 1,
+                maxRetryFrames: 15,
+                requireCameraRender: true,
+                ...options.barrierValidation,
+            };
+
+            await this.barrier.waitForFirstFrame(barrierValidation);
         }
 
-        // 3. 모든 Required Unit이 VALIDATED 확인
+        // 3. 최종 검증 - 모든 Required Unit이 VALIDATED인지 확인
         if (!this.registry.areAllRequiredValidated()) {
-            const notValidated = requiredUnits
+            const notValidated = this.registry
+                .getRequiredUnits()
                 .filter((u) => u.status !== LoadUnitStatus.VALIDATED && u.status !== LoadUnitStatus.SKIPPED)
                 .map((u) => `${u.id}(${u.status})`);
             throw new Error(`Not all required units validated: ${notValidated.join(', ')}`);
