@@ -3,16 +3,17 @@
  *
  * INPUT LAW (Constitutional Rule):
  * - Input state must be validated before any interactive phase
+ * - Scene input MUST be attached AFTER first render (Babylon.js design pattern)
  * - All input attachment state changes must go through this manager
  *
  * Purpose:
  * - Ensure engine input element is properly set before any input is expected
- * - Prevent input state loss during flow transitions
+ * - Defer scene.attachControl() to after first render (critical for input manager)
  * - Provide diagnostic logging for input state debugging
  *
  * Babylon.js Input Architecture:
- * - Engine.inputElement: The canvas element receiving input (set at Engine creation)
- * - Scene input manager: Processes pointer events for mesh picking
+ * - Engine.inputElement: The canvas element receiving input
+ * - Scene._inputManager: Created AFTER first render, when activeMeshes/camera are ready
  * - GUI (AdvancedDynamicTexture): Has its own pointer handling attached to scene
  */
 
@@ -20,11 +21,13 @@ import * as BABYLON from '@babylonjs/core';
 
 export class InputLifecycleManager {
     private static initialized = false;
+    private static sceneAttachPending = false;
 
     /**
      * Ensures engine and scene input is properly configured.
-     * In Babylon.js 5+, input is automatically attached when Engine is created with a canvas.
-     * This method validates the state and logs diagnostics.
+     *
+     * CRITICAL: Scene input is deferred to after first render via onAfterRenderObservable.
+     * This is the official Babylon.js pattern - input manager is only ready post-render.
      *
      * @param engine Babylon engine instance
      * @param scene Babylon scene instance
@@ -37,19 +40,22 @@ export class InputLifecycleManager {
             return;
         }
 
-        // Babylon.js 5+: Engine should automatically have inputElement set
-        // If not, we need to force-set it via internal property
+        // 1. Engine input attachment
         if (!engine.inputElement) {
             console.warn('[InputLifecycle] Engine inputElement is undefined - forcing attachment');
-            // Access internal property to set input element
             (engine as any)._inputElement = canvas;
         }
 
-        // Ensure scene input manager is active
-        // In Babylon 5+, scene.attachControl() was removed, but we can validate
+        // 2. Scene input attachment (MUST be deferred to after first render)
         const inputManager = (scene as any)._inputManager;
-        if (inputManager && typeof inputManager.attachControl === 'function') {
-            inputManager.attachControl();
+        if (!inputManager && !this.sceneAttachPending) {
+            this.sceneAttachPending = true;
+            scene.onAfterRenderObservable.addOnce(() => {
+                scene.attachControl();
+                this.sceneAttachPending = false;
+                console.info('[InputLifecycle] Scene control attached (post-render)');
+            });
+            console.info('[InputLifecycle] Scene attach scheduled for post-render');
         }
 
         this.initialized = true;
@@ -59,6 +65,7 @@ export class InputLifecycleManager {
             engineInputElement: engine.inputElement ? 'OK' : 'MISSING',
             inputElementMatch: engine.inputElement === canvas ? 'OK' : 'MISMATCH',
             sceneReady: scene.isReady(),
+            inputManagerExists: !!inputManager,
         });
     }
 
@@ -70,6 +77,7 @@ export class InputLifecycleManager {
         inputElementMatch: boolean;
         sceneReady: boolean;
         initialized: boolean;
+        hasInputManager: boolean;
     } {
         const canvas = engine.getRenderingCanvas();
         return {
@@ -77,6 +85,7 @@ export class InputLifecycleManager {
             inputElementMatch: engine.inputElement === canvas,
             sceneReady: scene.isReady(),
             initialized: this.initialized,
+            hasInputManager: !!(scene as any)._inputManager,
         };
     }
 }
