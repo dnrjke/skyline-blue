@@ -10,10 +10,21 @@
  * 이 Barrier는 onAfterRenderObservable을 사용하여
  * 실제로 렌더링이 성공했는지 검증한다.
  *
- * Arcana Evidence Model (Phase 2.5):
- * - Core visual = "렌더 파이프라인 진입 + 사용자에게 보일 수 있는 상태"
- * - activeMeshes는 증거 중 하나일 뿐, 유일 조건이 아님
- * - LinesMesh 등 frustum culling 제외 메시도 core visual일 수 있음
+ * Arcana Evidence Model (Constitutional Redesign):
+ *
+ * [NON-NEGOTIABLE PRINCIPLES]
+ * 1. TacticalGrid is the most visually dominant asset.
+ *    → It defines the Barrier standard, not the other way around.
+ *
+ * 2. visibility = 0 is an INTENTIONAL design choice (fade-in animation).
+ *    → Zero visibility is NOT failure.
+ *
+ * 3. Barrier must verify "ready to render", not "currently rendering".
+ *    → Construction readiness ≠ Presentation state
+ *
+ * 4. RENDER_READY evidence checks:
+ *    - mesh exists, not disposed, geometry loaded
+ *    → Does NOT check: visibility, alpha, isVisible, activeMeshes
  */
 
 import * as BABYLON from '@babylonjs/core';
@@ -36,10 +47,19 @@ export enum BarrierResult {
  * Barrier 증거 유형 (Evidence Type)
  *
  * - ACTIVE_MESH: Babylon activeMeshes에 포함 (frustum culled meshes)
- * - VISIBLE_MESH: 커스텀 가시성 검증 (LinesMesh 등 non-frustum-culled)
+ * - VISIBLE_MESH: 가시성 검증 포함 (visibility > 0 필수) - 레거시
+ * - RENDER_READY: 생성 완료 검증 (visibility 무시) - TacticalGrid용
  * - CUSTOM: 완전 커스텀 predicate
+ *
+ * [ARCHITECTURAL NOTE]
+ * RENDER_READY vs VISIBLE_MESH:
+ * - RENDER_READY: "렌더링 준비 완료" (can be rendered when visibility > 0)
+ * - VISIBLE_MESH: "현재 보임" (is currently being rendered)
+ *
+ * TacticalGrid uses RENDER_READY because it starts with visibility = 0
+ * and fades in later. This is intentional, not failure.
  */
-export type BarrierEvidence = 'ACTIVE_MESH' | 'VISIBLE_MESH' | 'CUSTOM';
+export type BarrierEvidence = 'ACTIVE_MESH' | 'VISIBLE_MESH' | 'RENDER_READY' | 'CUSTOM';
 
 /**
  * Barrier 요구사항 (개별 메시/요소 검증 조건)
@@ -346,8 +366,12 @@ export class RenderReadyBarrier {
                 return { success: false, reason: 'Not in active meshes' };
 
             case 'VISIBLE_MESH':
-                // LinesMesh 등 non-frustum-culled 메시 검증
+                // 가시성 검증 포함 (레거시)
                 return this.checkVisibleMesh(req);
+
+            case 'RENDER_READY':
+                // 생성 완료 검증 (visibility 무시) - TacticalGrid용
+                return this.checkRenderReady(req);
 
             case 'CUSTOM':
                 // 완전 커스텀 predicate
@@ -411,6 +435,59 @@ export class RenderReadyBarrier {
             return { success: false, reason: 'Custom predicate failed' };
         }
 
+        return { success: true, reason: '' };
+    }
+
+    /**
+     * RENDER_READY 증거 검증 (Constitutional Fix)
+     *
+     * TacticalGrid 같은 core visual의 "렌더링 준비 완료"를 검증한다.
+     *
+     * [검증 항목 - Construction Readiness]
+     * ✓ mesh 존재
+     * ✓ dispose 안 됨
+     * ✓ scene에 등록됨
+     * ✓ geometry 있음 (vertices > 0)
+     *
+     * [검증 제외 - Presentation State]
+     * ✗ visibility (의도적 0 허용)
+     * ✗ isVisible
+     * ✗ alpha / material opacity
+     * ✗ activeMeshes 포함 여부
+     * ✗ isEnabled (presentation choice)
+     *
+     * 이 검증이 통과하면: "이 메시는 visibility > 0이 되는 순간 렌더링된다"
+     */
+    private checkRenderReady(req: BarrierRequirement): { success: boolean; reason: string } {
+        const mesh = this.scene.getMeshByName(req.id);
+
+        // 1. Existence check
+        if (!mesh) {
+            return { success: false, reason: 'Mesh not found in scene' };
+        }
+
+        // 2. Disposal check (fatal - cannot recover)
+        if (mesh.isDisposed()) {
+            return { success: false, reason: 'Mesh disposed (fatal)' };
+        }
+
+        // 3. Scene registration check
+        if (!this.scene.meshes.includes(mesh)) {
+            return { success: false, reason: 'Mesh not registered in scene.meshes' };
+        }
+
+        // 4. Geometry check (must have vertices to be renderable)
+        if (mesh.getTotalVertices() <= 0) {
+            return { success: false, reason: 'No geometry (vertices = 0)' };
+        }
+
+        // 5. Custom predicate (optional domain-level contract)
+        if (req.predicate && !req.predicate(this.scene)) {
+            return { success: false, reason: 'Domain predicate failed' };
+        }
+
+        // ✓ Construction readiness confirmed
+        // visibility = 0 is ALLOWED (intentional fade-in)
         return { success: true, reason: '' };
     }
 

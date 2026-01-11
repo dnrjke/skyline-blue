@@ -98,6 +98,26 @@ export class TacticalHologram {
     }
 
     /**
+     * 렌더링 준비 완료 여부 (Barrier RENDER_READY 증거용)
+     *
+     * [검증 항목 - Construction Readiness]
+     * ✓ mesh 존재, dispose 안됨, scene에 등록됨
+     * ✓ geometry 있음 (vertices > 0)
+     *
+     * [검증 제외 - Presentation State]
+     * ✗ visibility (의도적 0 허용 - fade-in 애니메이션)
+     * ✗ isEnabled, isVisible
+     *
+     * 이 검증이 통과하면: "visibility > 0이 되는 순간 렌더링된다"
+     */
+    isRenderReady(): boolean {
+        if (!this.isCreated()) return false;
+        // geometry check - must have vertices to be renderable
+        if (this.gridLines!.getTotalVertices() <= 0) return false;
+        return true;
+    }
+
+    /**
      * 그리드 메시 이름 반환 (Barrier 검증용)
      */
     getGridMeshName(): string {

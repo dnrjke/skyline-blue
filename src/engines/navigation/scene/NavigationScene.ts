@@ -291,13 +291,14 @@ export class NavigationScene {
                 // WARMING phase
                 MaterialWarmupUnit.createNavigationWarmupUnit(),
 
-                // BARRIER phase - 렌더링 가시성 검증 (첫 프레임에 필수 메시들이 렌더됐는가)
-                // TacticalGrid는 LinesMesh라서 activeMeshes에 안 들어감 → VISIBLE_MESH 증거 사용
+                // BARRIER phase - 렌더링 준비 완료 검증
+                // TacticalGrid는 visibility=0으로 시작 (fade-in) → RENDER_READY 증거 사용
+                // RENDER_READY: 생성 완료 확인, visibility 무시 (의도적 0 허용)
                 RenderReadyBarrierUnit.createForNavigation({
                     requirements: [
                         {
                             id: this.hologram.getGridMeshName(),
-                            evidence: 'VISIBLE_MESH',
+                            evidence: 'RENDER_READY',
                         } as BarrierRequirement,
                     ],
                 }),
