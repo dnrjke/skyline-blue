@@ -304,20 +304,17 @@ export class NavigationScene {
                     ],
                 }),
 
-                // VISUAL_READY phase - TacticalGrid 실제 시각 검증
-                // [TacticalGrid Incident Prevention]
-                // ❗ 이 유닛이 없으면 과거 사고가 재발할 수 있음
+                // VISUAL_READY phase - TacticalGrid "보이기 시작" 검증
+                // [VISUAL_READY는 "보이기 시작했는지"만 검증]
+                // ✓ mesh 존재
+                // ✓ mesh.isEnabled() === true
                 // ✓ mesh.isVisible === true
-                // ✓ mesh.visibility > 0
-                // ✓ mesh.getWorldMatrix().determinant !== 0
-                // ✓ mesh.isReady(true)
-                // ✓ N 연속 프레임 성공 필수
+                // ❌ 안정성/완성도는 STABILIZING_100에서 검증
                 new VisualReadyUnit('nav-visual-ready', {
                     displayName: 'TacticalGrid Visual Verification',
                     requirements: [
                         createTacticalGridVisualRequirement(),
                     ],
-                    minConsecutiveFrames: 3,
                 }),
             ]);
 

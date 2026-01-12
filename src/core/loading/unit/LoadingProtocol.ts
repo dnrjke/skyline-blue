@@ -322,16 +322,28 @@ export class LoadingProtocol {
             await this.barrier.waitForFirstFrame(barrierValidation);
         }
 
-        // 3. 최종 검증 - 모든 Required Unit이 VALIDATED인지 확인
-        if (!this.registry.areAllRequiredValidated()) {
-            const notValidated = this.registry
-                .getRequiredUnits()
-                .filter((u) => u.status !== LoadUnitStatus.VALIDATED && u.status !== LoadUnitStatus.SKIPPED)
-                .map((u) => `${u.id}(${u.status})`);
-            throw new Error(`Not all required units validated: ${notValidated.join(', ')}`);
+        // 3. 최종 검증 - BARRIER 이전 phase의 Required Unit이 VALIDATED인지 확인
+        // [NOTE] VISUAL_READY, STABILIZING_100 유닛은 아직 실행 전이므로 제외
+        const preVisualPhases = [
+            LoadingPhase.FETCHING,
+            LoadingPhase.BUILDING,
+            LoadingPhase.WARMING,
+            LoadingPhase.BARRIER,
+        ];
+
+        const preVisualRequired = this.registry
+            .getRequiredUnits()
+            .filter((u) => preVisualPhases.includes(u.phase));
+
+        const notValidated = preVisualRequired
+            .filter((u) => u.status !== LoadUnitStatus.VALIDATED && u.status !== LoadUnitStatus.SKIPPED)
+            .map((u) => `${u.id}(${u.status})`);
+
+        if (notValidated.length > 0) {
+            throw new Error(`Not all pre-visual required units validated: ${notValidated.join(', ')}`);
         }
 
-        options.onProgress?.(0.95);
+        options.onProgress?.(0.90);
     }
 
     /**
