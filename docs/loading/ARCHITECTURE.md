@@ -116,7 +116,9 @@ for (const unit of visualUnits) {
 - [x] StabilizationGuard (시간/프레임 기반) - `STABILIZATION_SETTINGS`
 - [x] LoadingProtocol에 새 phase 연결
 - [x] RenderReadyBarrier 단순화 (activeMeshes 제거)
-- [ ] NavigationScene을 새 로딩 아키텍처에 맞게 수정
+- [x] NavigationScene Post-READY input gating 구현
+- [x] VisualRequirement lifecycle (attach/detach) 구현
+- [x] Frustum-based render detection 구현
 - [x] 문서 업데이트 (과거 사고 명시 포함)
 
 ---
@@ -128,6 +130,11 @@ for (const unit of visualUnits) {
 - ❌ optional-only VISUAL_READY
 - ❌ Barrier가 시각 요소 의미를 해석
 - ❌ 100%에서 즉시 READY 전환
+- ❌ VISUAL_READY에서 안정성/연속 프레임 검사 (STABILIZING_100 책임)
+- ❌ Scene Explorer 등록만으로 "보인다" 판단
+- ❌ READY 즉시 input 활성화 (반드시 +1 frame 대기)
+- ❌ attach() 중복 호출 시 observer 누적
+- ❌ detach() 없이 VisualRequirement 종료
 
 ---
 
@@ -156,7 +163,7 @@ for (const unit of visualUnits) {
 
 ```
 PENDING → FETCHING → BUILDING → WARMING → BARRIER
-       → VISUAL_READY → STABILIZING_100 → READY
+       → VISUAL_READY → STABILIZING_100 → READY → [POST_READY]
 ```
 
 ### Phase Boundaries (Progress %)
@@ -168,9 +175,10 @@ PENDING → FETCHING → BUILDING → WARMING → BARRIER
 | BUILDING | 10-70% | Scene construction |
 | WARMING | 70-85% | Material compilation |
 | BARRIER | 85-90% | Render loop confirmed (NOT visual readiness) |
-| VISUAL_READY | 90-100% | Actual visual verification |
-| STABILIZING_100 | 100% (held) | Visual stability hold |
+| VISUAL_READY | 90-100% | Actual visual verification (frustum-based) |
+| STABILIZING_100 | 100% (held) | Visual stability hold (300ms / 30 frames) |
 | READY | 100% | Transition allowed |
+| POST_READY | - | Input unlock after +1 render frame |
 
 ### Constitutional Rule
 
@@ -178,12 +186,115 @@ PENDING → FETCHING → BUILDING → WARMING → BARRIER
 
 ---
 
+## 🔍 VisualRequirement Lifecycle (Frustum-based Detection)
+
+### 핵심 원칙
+
+Scene Explorer에 mesh가 등록된 시점 ≠ 카메라 시야 내 렌더링 시점
+
+따라서 VisualRequirement는 **onAfterRenderObservable 내에서 frustum 검증**을 수행한다.
+
+### Lifecycle Methods
+
+```typescript
+interface VisualRequirement {
+    id: string;
+    displayName: string;
+    attach?: (scene: Scene) => void;   // Observer 등록
+    validate: (scene: Scene) => VisualValidationResult;  // 검증
+    detach?: (scene: Scene) => void;   // Observer 정리
+}
+```
+
+### TacticalGridVisualRequirement 구현 패턴
+
+```typescript
+attach(scene: Scene): void {
+    if (observer) return;  // 중복 방지
+    seenInRender = false;
+
+    observer = scene.onAfterRenderObservable.add(() => {
+        if (seenInRender) return;
+        const mesh = scene.getMeshByName('TacticalGrid');
+        if (!mesh || !mesh.isEnabled() || !mesh.isVisible) return;
+
+        const camera = scene.activeCamera;
+        const boundingInfo = mesh.getBoundingInfo();
+        const frustumPlanes = scene.frustumPlanes;
+
+        if (frustumPlanes && boundingInfo.isInFrustum(frustumPlanes)) {
+            seenInRender = true;
+            console.log('[TacticalGridVisualRequirement] ✓ Rendered in camera frustum');
+        }
+    });
+}
+
+detach(scene: Scene): void {
+    if (!observer) return;
+    scene.onAfterRenderObservable.remove(observer);
+    observer = null;
+}
+
+validate(): VisualValidationResult {
+    if (!seenInRender) {
+        return { ready: false, reason: 'not yet rendered in camera frustum' };
+    }
+    return { ready: true };
+}
+```
+
+### Phase별 책임 분리
+
+| Phase | 검증 대상 | 절대 금지 |
+|-------|----------|----------|
+| BARRIER | 렌더 루프 시작, 카메라 attach | visibility 검사 |
+| VISUAL_READY | mesh visible, frustum 내 렌더링 | 안정성/연속 프레임 검사 |
+| STABILIZING_100 | N 연속 프레임 안정 유지 | visibility 재검증 |
+
+---
+
+## 🚀 Post-READY Procedure (Input Unlock Delay)
+
+### 원칙
+
+> READY 도달 후 **즉시 input을 활성화하지 않는다**.
+
+### 구현
+
+```typescript
+onReady: () => {
+    console.log('[READY] reached');
+    hooks?.onLog?.('[READY] reached');
+
+    // Camera transition 후...
+    this.cameraController.transitionIn(distance, () => {
+        // +1 render frame 대기
+        this.scene.onAfterRenderObservable.addOnce(() => {
+            this.inputLocked = false;
+            console.log('[POST_READY] input unlocked');
+            hooks?.onLog?.('[POST_READY] input unlocked');
+        });
+    });
+}
+```
+
+### 로그 출력 (필수)
+
+```
+[READY] reached
+[POST_READY] input unlocked
+```
+
+---
+
 ## 📁 Key Files
 
 | File | Purpose |
 |------|---------|
-| `src/core/loading/protocol/LoadingPhase.ts` | Phase enum and utilities |
-| `src/core/loading/progress/ArcanaProgressModel.ts` | Phase-based progress calculation |
-| `src/core/loading/unit/VisualReadyUnit.ts` | Visual readiness verification |
+| `src/core/loading/protocol/LoadingPhase.ts` | Phase enum, transition validation |
+| `src/core/loading/progress/ArcanaProgressModel.ts` | Phase-based progress, STABILIZATION_SETTINGS |
+| `src/core/loading/unit/LoadingProtocol.ts` | Phase orchestration, executeVisualReadyPhase() |
+| `src/core/loading/unit/VisualReadyUnit.ts` | VisualRequirement interface, TacticalGridVisualRequirement |
 | `src/core/loading/barrier/RenderReadyBarrier.ts` | Render loop confirmation only |
 | `src/core/loading/orchestrator/ArcanaLoadingOrchestrator.ts` | High-level orchestration |
+| `src/engines/navigation/scene/NavigationScene.ts` | Post-READY input gating 구현

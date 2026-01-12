@@ -5,12 +5,23 @@
  *
  * Phase Flow (Final Form):
  *   FETCHING → BUILDING → WARMING → BARRIER
- *           → VISUAL_READY → STABILIZING_100 → READY
+ *           → VISUAL_READY → STABILIZING_100 → READY → [POST_READY]
  *
  * Key Rules:
- * - BARRIER → READY 직접 전이 금지
- * - VISUAL_READY에서 실제 시각 요소 검증
- * - STABILIZING_100에서 안정화 홀드
+ * - BARRIER → READY 직접 전이 금지 (Constitutional)
+ * - VISUAL_READY에서 실제 시각 요소 검증 (frustum-based)
+ * - STABILIZING_100에서 안정화 홀드 (300ms/30frames)
+ * - POST_READY: READY 후 +1 render frame 대기 후 input unlock
+ *
+ * VisualRequirement Lifecycle:
+ * - attach(): 검증 시작 시 observer 등록
+ * - validate(): 매 폴링마다 호출 (ready: true/false)
+ * - detach(): VISUAL_READY 완료 후 observer 정리
+ *
+ * Frustum-based Detection:
+ * - Scene Explorer 등록 ≠ 카메라 시야 내 렌더링
+ * - boundingInfo.isInFrustum(frustumPlanes) 사용
+ * - onAfterRenderObservable 내에서만 검증
  *
  * 사용법:
  * ```typescript
@@ -24,7 +35,7 @@
  * });
  *
  * if (result.phase === LoadingPhase.READY) {
- *   // 게임 시작
+ *   // POST_READY: 1 render frame 후 input 활성화
  * }
  * ```
  */
