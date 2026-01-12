@@ -45,19 +45,31 @@ export interface VisualRequirement {
     displayName: string;
 
     /**
+     * Optional: Attach render observers to track actual rendering.
+     * Called once when VisualReadyUnit starts loading.
+     * Use this to set up onAfterRenderObservable hooks.
+     */
+    attach?: (scene: BABYLON.Scene) => void;
+
+    /**
+     * Optional: Detach render observers.
+     * Called when VisualReadyUnit completes or fails.
+     */
+    detach?: (scene: BABYLON.Scene) => void;
+
+    /**
      * Validation function that checks if this visual is ready.
      *
+     * [VISUAL_READY Phase - Actual Render Check]
+     * "Scene에 존재"가 아니라 "카메라에 렌더링됨"을 확인.
+     *
      * MUST check:
-     * - mesh.isEnabled()
-     * - mesh.isVisible
-     * - mesh.visibility > 0
-     * - boundingInfo exists (for mesh requirements)
-     * - mesh is part of scene.meshes
+     * - Has mesh been rendered in camera frustum at least once?
      *
      * MUST NOT check:
-     * - activeMeshes inclusion
+     * - activeMeshes inclusion (indirect indicator)
      * - timing-based conditions
-     * - "rendered at least once"
+     * - stability / consecutive frames (STABILIZING_100 responsibility)
      */
     validate: (scene: BABYLON.Scene) => VisualValidationResult;
 }
@@ -212,8 +224,9 @@ export class VisualReadyUnit implements LoadUnit {
     /**
      * Execute visual validation for all requirements
      *
-     * [VISUAL_READY Phase - Minimal Visibility Check]
-     * "보이기 시작했는지"만 검증. 안정성은 STABILIZING_100에서 담당.
+     * [VISUAL_READY Phase - Actual Render Detection]
+     * "Scene에 존재"가 아니라 "카메라에 렌더링됨"을 확인.
+     * attach()로 렌더 옵저버 등록 → validate()로 렌더 여부 확인 → detach()로 정리
      */
     async load(
         scene: BABYLON.Scene,
@@ -230,6 +243,15 @@ export class VisualReadyUnit implements LoadUnit {
         const requirements = this.config.requirements;
         const maxAttempts = this.config.maxAttempts!;
         const attemptDelayMs = this.config.attemptDelayMs!;
+
+        // [Step 1] Attach render observers for all requirements
+        for (const req of requirements) {
+            try {
+                req.attach?.(scene);
+            } catch (err) {
+                console.warn(`[VisualReadyUnit] Failed to attach ${req.id}:`, err);
+            }
+        }
 
         let attempt = 0;
 
@@ -249,7 +271,7 @@ export class VisualReadyUnit implements LoadUnit {
 
                     if (result.ready) {
                         this.validatedRequirements.add(req.id);
-                        console.log(`[VisualReadyUnit] ✓ ${req.displayName} visible`);
+                        console.log(`[VisualReadyUnit] ✓ ${req.displayName} rendered`);
                     } else {
                         pendingRequirements.push(req);
                         allReady = false;
@@ -264,15 +286,18 @@ export class VisualReadyUnit implements LoadUnit {
                 onProgress?.({
                     progress,
                     message: allReady
-                        ? 'All visuals visible'
+                        ? 'All visuals rendered'
                         : `Waiting: ${pendingRequirements[0]?.displayName ?? 'visuals'}`,
                 });
 
                 if (allReady) {
+                    // [Step 2] Detach observers on success
+                    this.detachRequirements(scene, requirements);
+
                     this.status = LoadUnitStatus.VALIDATED;
                     this.elapsedMs = performance.now() - startTime;
                     console.log(
-                        `[VisualReadyUnit] All ${requirements.length} requirements visible ` +
+                        `[VisualReadyUnit] All ${requirements.length} requirements rendered ` +
                         `in ${attempt} attempts, ${Math.round(this.elapsedMs)}ms`
                     );
                     return;
@@ -280,6 +305,9 @@ export class VisualReadyUnit implements LoadUnit {
 
                 await this.delay(attemptDelayMs);
             }
+
+            // [Step 2] Detach observers on failure
+            this.detachRequirements(scene, requirements);
 
             // Max attempts reached - EXPLICIT FAILURE
             const pendingNames = this.config.requirements
@@ -290,16 +318,32 @@ export class VisualReadyUnit implements LoadUnit {
             this.status = LoadUnitStatus.FAILED;
             this.elapsedMs = performance.now() - startTime;
             this.error = new Error(
-                `[VisualReadyUnit] VISUAL_READY FAILED: ${pendingNames} not visible after ${maxAttempts} attempts`
+                `[VisualReadyUnit] VISUAL_READY FAILED: ${pendingNames} not rendered after ${maxAttempts} attempts`
             );
             throw this.error;
         } catch (err) {
+            // Ensure cleanup on error
+            this.detachRequirements(scene, requirements);
+
             this.elapsedMs = performance.now() - startTime;
             if (!(err instanceof Error && err === this.error)) {
                 this.error = err instanceof Error ? err : new Error(String(err));
             }
             this.status = LoadUnitStatus.FAILED;
             throw this.error;
+        }
+    }
+
+    /**
+     * Detach render observers from all requirements
+     */
+    private detachRequirements(scene: BABYLON.Scene, requirements: VisualRequirement[]): void {
+        for (const req of requirements) {
+            try {
+                req.detach?.(scene);
+            } catch (err) {
+                console.warn(`[VisualReadyUnit] Failed to detach ${req.id}:`, err);
+            }
         }
     }
 
@@ -357,51 +401,94 @@ export class VisualReadyUnit implements LoadUnit {
 /**
  * Factory for creating TacticalGrid visual requirement
  *
- * [VISUAL_READY Phase - Minimal Visibility Check]
+ * [VISUAL_READY Phase - Actual Render Detection]
  *
- * ❗ VISUAL_READY는 "보이기 시작했는지"만 검증
+ * ❗ "Scene에 존재"가 아니라 "카메라에 렌더링됨"을 확인
+ * ❗ Scene Explorer 기준 완전 배제
  * ❗ 안정성/완성도 검증은 STABILIZING_100에서 수행
  *
+ * 검증 로직:
+ * 1. attach(): onAfterRenderObservable로 렌더 감시 시작
+ * 2. validate(): "한 번이라도 카메라 frustum 내에서 렌더되었는가?"
+ * 3. detach(): 옵저버 정리
+ *
  * 이 조건만 충족하면 PASS:
- * ✓ mesh 존재
- * ✓ mesh.isEnabled() === true
- * ✓ mesh.isVisible === true
+ * ✓ mesh가 카메라 frustum 내에서 최소 1회 렌더됨
  *
  * ❌ 다음은 VISUAL_READY에서 검사하지 않음 (STABILIZING_100 책임):
- * - visibility > 0 (fade-in 중일 수 있음)
- * - worldMatrix determinant
- * - mesh.isReady(true)
- * - bounding info 안정성
  * - 연속 프레임 안정성
+ * - bounds 크기 안정성
+ * - material warmup
  */
 export function createTacticalGridVisualRequirement(): VisualRequirement {
+    // Closure state for render tracking
+    let seenInRender = false;
+    let observer: BABYLON.Nullable<BABYLON.Observer<BABYLON.Scene>> = null;
+
     return {
         id: 'visual:TacticalGrid',
         displayName: 'Tactical Grid',
-        validate: (scene: BABYLON.Scene): VisualValidationResult => {
-            const mesh = scene.getMeshByName('TacticalGrid');
 
-            // 1. Mesh 존재 확인
-            if (!mesh) {
-                return { ready: false, reason: 'TacticalGrid mesh not found' };
+        attach(scene: BABYLON.Scene): void {
+            // Reset state
+            seenInRender = false;
+
+            // Watch for actual rendering
+            observer = scene.onAfterRenderObservable.add(() => {
+                if (seenInRender) return; // Already confirmed
+
+                const mesh = scene.getMeshByName('TacticalGrid');
+                if (!mesh || mesh.isDisposed()) return;
+
+                const camera = scene.activeCamera;
+                if (!camera) return;
+
+                // Check if mesh is in renderable state
+                if (!mesh.isEnabled() || !mesh.isVisible) return;
+
+                // Check if mesh is in camera frustum
+                const boundingInfo = mesh.getBoundingInfo();
+                if (!boundingInfo) return;
+
+                try {
+                    // isInFrustum checks if bounding box intersects camera frustum
+                    const frustumPlanes = scene.frustumPlanes;
+
+                    if (frustumPlanes && frustumPlanes.length > 0 && boundingInfo.isInFrustum(frustumPlanes)) {
+                        seenInRender = true;
+                        console.log('[TacticalGridVisualRequirement] ✓ Rendered in camera frustum');
+                    }
+                } catch {
+                    // Fallback: if frustum check fails, check if mesh was in activeMeshes
+                    // This is a safety net, not the primary check
+                    const activeMeshes = scene.getActiveMeshes();
+                    if (activeMeshes.data.includes(mesh)) {
+                        seenInRender = true;
+                        console.log('[TacticalGridVisualRequirement] ✓ Found in activeMeshes (fallback)');
+                    }
+                }
+            });
+
+            console.log('[TacticalGridVisualRequirement] Attached render observer');
+        },
+
+        detach(scene: BABYLON.Scene): void {
+            if (observer) {
+                scene.onAfterRenderObservable.remove(observer);
+                observer = null;
+                console.log('[TacticalGridVisualRequirement] Detached render observer');
+            }
+        },
+
+        validate(_scene: BABYLON.Scene): VisualValidationResult {
+            if (!seenInRender) {
+                return {
+                    ready: false,
+                    reason: 'TacticalGrid not yet rendered in camera frustum',
+                };
             }
 
-            if (mesh.isDisposed()) {
-                return { ready: false, reason: 'TacticalGrid is disposed' };
-            }
-
-            // 2. isEnabled 확인 (Babylon visibility control)
-            if (!mesh.isEnabled()) {
-                return { ready: false, reason: 'TacticalGrid is not enabled' };
-            }
-
-            // 3. isVisible 확인 (명시적 숨김 상태 아님)
-            if (!mesh.isVisible) {
-                return { ready: false, reason: 'TacticalGrid isVisible = false' };
-            }
-
-            // ✅ VISUAL_READY 통과 - "보이기 시작함"
-            // 안정성/완성도는 STABILIZING_100에서 검증
+            // ✅ VISUAL_READY 통과 - "최소 1회 렌더됨"
             return { ready: true };
         },
     };
