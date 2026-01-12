@@ -327,11 +327,21 @@ export class NavigationScene {
             const result = await this.orchestrator.execute({
                 onLog: hooks?.onLog,
                 onReady: () => {
+                    // [READY] Phase reached - loading protocol complete
+                    console.log('[READY] Loading complete, starting camera transition');
+                    hooks?.onLog?.('[READY] reached');
+
                     // Camera transition starts AFTER render-ready barrier passes
                     this.cameraController.transitionIn(LAYOUT.HOLOGRAM.GRID_SIZE / 2, () => {
-                        this.inputLocked = false;
-                        hooks?.onProgress?.(1);
-                        hooks?.onReady?.();
+                        // Post-READY: wait 1 render frame before enabling input
+                        // This ensures all visual elements are fully stable
+                        this.scene.onAfterRenderObservable.addOnce(() => {
+                            this.inputLocked = false;
+                            console.log('[POST_READY] Input unlocked after 1 render frame');
+                            hooks?.onLog?.('[POST_READY] input unlocked');
+                            hooks?.onProgress?.(1);
+                            hooks?.onReady?.();
+                        });
                     });
                 },
                 onError: (err) => {
