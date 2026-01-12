@@ -1,17 +1,25 @@
+/**
+ * NavigationScene - Phase 3 Tactical Design Scene
+ *
+ * MIGRATION COMPLETE: Legacy Dijkstra/PathStore removed.
+ * Now uses Fate-Linker system for manual path design.
+ *
+ * Design Philosophy:
+ * "Fate is chosen, not computed."
+ */
+
 import * as BABYLON from '@babylonjs/core';
 import * as GUI from '@babylonjs/gui';
-import { NavigationGraph } from '../graph/NavigationGraph';
-import { PathStore } from '../store/PathStore';
-import { CoordinateMapper } from '../mapping/CoordinateMapper';
 import { TacticalHologram } from '../visualization/TacticalHologram';
-import { NavigationVisualizer } from '../visualization/NavigationVisualizer';
-import { NavigationHUD } from '../ui/NavigationHUD';
-import { ActivePathEffect } from '../visualization/ActivePathEffect';
 import { ScanLineEffect } from '../visualization/ScanLineEffect';
 import { NavigationCameraController } from './NavigationCameraController';
 import { LAYOUT } from '../../../shared/design';
-import { NavigationLinkNetwork } from '../visualization/NavigationLinkNetwork';
 import type { NavigationStartHooks } from '../NavigationEngine';
+
+// Phase 3: Fate-Linker System
+import { TacticalDesignController, type TacticalDesignState } from '../tactical';
+import { FlightController, type FlightResult } from '../flight';
+import { CoordinateMapper } from '../mapping/CoordinateMapper';
 
 // LoadUnit-based Loading Architecture
 import {
@@ -20,83 +28,119 @@ import {
     MaterialWarmupUnit,
     RenderReadyBarrierUnit,
     BarrierRequirement,
-    // VISUAL_READY Phase (TacticalGrid Incident Prevention)
     VisualReadyUnit,
     createTacticalGridVisualRequirement,
+    type LoadUnit,
 } from '../../../core/loading';
 import {
-    DataFetchUnit,
     EnvironmentUnit,
     TacticalGridUnit,
-    GraphVisualizerUnit,
-    LinkNetworkUnit,
     OctreeUnit,
 } from '../loading/units';
 
+// Phase 3: Character Loading
+import { CharacterLoadUnit } from '../loading/CharacterLoadUnit';
+
 export interface NavigationSceneConfig {
-    energyBudget: number;
+    /** @deprecated Energy budget is no longer used in Phase 3 */
+    energyBudget?: number;
+    /** Maximum nodes for Fate-Linker */
+    maxNodes?: number;
+    /** Character model path */
+    characterModelPath?: string;
 }
 
 /**
- * NavigationScene - Phase 2 tactical planning scene.
+ * NavigationScene - Phase 3 tactical planning scene.
  *
- * Input model (HEBS-friendly):
- * - Main에서 InteractionLayer의 핸들러가 호출될 때, pointerX/Y를 전달해 handleTap()을 호출한다.
- * - NavigationScene 내부는 scene.pick()로 mesh를 판정한다.
+ * Key Changes from Phase 2:
+ * - NO NavigationGraph (legacy)
+ * - NO PathStore (legacy)
+ * - NO Dijkstra-based validation
+ * - Uses FateLinker for manual node design
+ * - Uses FlightController for path execution
  */
 export class NavigationScene {
     private scene: BABYLON.Scene;
-    private systemLayer: GUI.Rectangle;
 
-    private graph: NavigationGraph;
-    private pathStore: PathStore;
+    // Phase 3: Core systems
+    private tacticalDesign: TacticalDesignController;
+    private flightController: FlightController;
     private mapper: CoordinateMapper;
+    private characterLoadUnit: CharacterLoadUnit | null = null;
 
+    // Visualization
     private hologram: TacticalHologram;
-    private visualizer: NavigationVisualizer;
-    private linkNetwork: NavigationLinkNetwork;
-    private hud: NavigationHUD;
-    private activePath: ActivePathEffect;
     private scanLine: ScanLineEffect;
     private cameraController: NavigationCameraController;
 
+    // UI
+    private hud: TacticalHUD | null = null;
+
+    // State
     private active: boolean = false;
     private inputLocked: boolean = false;
-    private launched: boolean = false;
+    private isFlying: boolean = false;
 
     // LoadUnit-based Loading Architecture
     private orchestrator: ArcanaLoadingOrchestrator | null = null;
     private environmentUnit: EnvironmentUnit | null = null;
     private currentPhase: LoadingPhase = LoadingPhase.PENDING;
 
-    // Camera swap (Main's camera <-> Navigation camera)
+    // Camera
     private previousCamera: BABYLON.Camera | null = null;
     private navigationCamera: BABYLON.ArcRotateCamera | null = null;
 
     private currentStage = { episode: 1, stage: 1 } as const;
     private startHooks: NavigationStartHooks | null = null;
+    private config: NavigationSceneConfig;
 
-    constructor(scene: BABYLON.Scene, systemLayer: GUI.Rectangle, config: NavigationSceneConfig) {
+    constructor(scene: BABYLON.Scene, systemLayer: GUI.Rectangle, config: NavigationSceneConfig = {}) {
         this.scene = scene;
-        this.systemLayer = systemLayer;
+        this.config = config;
 
-        this.graph = new NavigationGraph();
-        this.pathStore = new PathStore(this.graph, config.energyBudget);
+        // Phase 3: Initialize Fate-Linker based systems
+        this.tacticalDesign = new TacticalDesignController(scene, {
+            maxNodes: config.maxNodes ?? 15,
+        });
+
+        this.flightController = new FlightController(scene, {
+            speed: 8,
+        });
+
         this.mapper = new CoordinateMapper();
 
+        // Visualization
         this.hologram = new TacticalHologram(this.scene);
-        this.visualizer = new NavigationVisualizer(this.scene, this.graph);
-        this.linkNetwork = new NavigationLinkNetwork(this.scene, this.graph);
-        this.hud = new NavigationHUD(this.systemLayer, {
-            onClear: () => {
-                this.pathStore.clear();
-                this.syncUI();
-            },
-            onConfirm: () => this.confirmAndLaunch(),
-        });
-        this.activePath = new ActivePathEffect(this.scene);
         this.scanLine = new ScanLineEffect(this.scene);
         this.cameraController = new NavigationCameraController(this.scene, this.hologram, this.scanLine);
+
+        // Setup tactical design callbacks
+        this.setupTacticalCallbacks();
+
+        // Create HUD
+        this.hud = new TacticalHUD(systemLayer, {
+            onClear: () => this.clearPath(),
+            onUndo: () => this.undoLastNode(),
+            onConfirm: () => this.confirmAndLaunch(),
+        });
+    }
+
+    private setupTacticalCallbacks(): void {
+        this.tacticalDesign.setCallbacks({
+            onStateChange: (state) => {
+                this.hud?.updateState(state);
+            },
+            onNodeAdded: (node) => {
+                console.log(`[NavigationScene] Node ${node.index} added at`, node.position.toString());
+            },
+            onNodeRemoved: (index) => {
+                console.log(`[NavigationScene] Node ${index} removed`);
+            },
+            onPathChanged: (nodeCount) => {
+                console.log(`[NavigationScene] Path changed: ${nodeCount} nodes`);
+            },
+        });
     }
 
     private ensureNavigationCamera(): void {
@@ -104,7 +148,6 @@ export class NavigationScene {
 
         this.previousCamera = this.scene.activeCamera ?? null;
 
-        // Tactical planning: ArcRotate gives stable alpha/beta/radius cinematic motion.
         const cam = new BABYLON.ArcRotateCamera(
             'NavArcCam',
             -Math.PI / 2,
@@ -116,46 +159,24 @@ export class NavigationScene {
         cam.lowerRadiusLimit = 10;
         cam.upperRadiusLimit = 70;
         cam.wheelPrecision = 80;
-        cam.panningSensibility = 0; // no manual panning in Phase 2.3
+        cam.panningSensibility = 200; // Enable panning for Phase 3
 
-        // [FIX] Ensure camera doesn't filter out any layer masks
-        // includeOnlyWithLayerMask = 0 means "no filter" (allow all)
         cam.layerMask = 0x0FFFFFFF;
         (cam as any).includeOnlyWithLayerMask = 0;
-        console.log('[NavCamera] layerMask=0x' + cam.layerMask.toString(16) +
-            ', includeOnly=0x' + ((cam as any).includeOnlyWithLayerMask ?? 0).toString(16));
 
         cam.attachControl(this.scene.getEngine().getRenderingCanvas(), true);
 
         this.scene.activeCamera = cam;
         this.navigationCamera = cam;
 
-        // [DEBUG] Camera render path diagnostics
-        console.log('[NavCamera] Render path diagnostics:', {
-            mode: cam.mode === BABYLON.Camera.PERSPECTIVE_CAMERA ? 'PERSPECTIVE' :
-                  cam.mode === BABYLON.Camera.ORTHOGRAPHIC_CAMERA ? 'ORTHOGRAPHIC' : `UNKNOWN(${cam.mode})`,
-            outputRenderTarget: (cam as any).outputRenderTarget ?? 'none',
-            rigMode: (cam as any).rigMode ?? 'none',
-            cameraRigMode: (cam as any).cameraRigMode ?? 'none',
-            isRigCamera: (cam as any).isRigCamera ?? false,
-            customRenderTargets: cam.customRenderTargets?.length ?? 0,
-        });
+        // Connect camera to tactical design controller
+        this.tacticalDesign.setCamera(cam);
 
-        // [DEBUG] Compare with existing active meshes
-        const activeMeshes = this.scene.getActiveMeshes();
-        if (activeMeshes.length > 0) {
-            const sampleMesh = activeMeshes.data[0];
-            console.log('[NavCamera] Sample active mesh for comparison:', {
-                name: sampleMesh?.name,
-                renderingGroupId: sampleMesh?.renderingGroupId,
-                layerMask: sampleMesh ? '0x' + sampleMesh.layerMask.toString(16) : 'N/A',
-                parent: sampleMesh?.parent?.name ?? 'none',
-            });
-        }
-
-        // Keep render quality (MSAA etc.) applied when camera swaps.
+        // Keep render quality
         const rq = (this.scene.metadata as any)?.renderQuality as { addCamera?: (c: BABYLON.Camera) => void } | undefined;
         rq?.addCamera?.(cam);
+
+        console.log('[NavigationScene] Camera initialized');
     }
 
     private restorePreviousCamera(): void {
@@ -178,62 +199,39 @@ export class NavigationScene {
     start(hooks: NavigationStartHooks = {}): void {
         if (this.active) return;
         this.active = true;
-        this.launched = false;
+        this.isFlying = false;
         this.startHooks = hooks;
 
         if (hooks.stage) {
-            // store stage selection for loader usage
             (this.currentStage as any) = { episode: hooks.stage.episode, stage: hooks.stage.stage };
         }
 
-        // Essential visuals first: camera + hologram + HUD are immediate.
         this.ensureNavigationCamera();
 
-        // Hologram look (grid is faded in by camera transition)
         this.hologram.enable();
         this.hologram.setVisibility(0);
 
-        this.hud.show();
-        // Phase 2.5: Watchdog reset immediately to avoid stale text (잔상)
-        this.hud.setWatchdogStatus('SCANNING...');
-        this.syncUI();
+        this.hud?.show();
+        this.hud?.updateState(this.tacticalDesign.getState());
 
         this.inputLocked = true;
-        // Data + assets are loaded asynchronously (Phase 2.3).
         void this.startAsync();
 
-        console.log('[NavigationScene] Started');
+        console.log('[NavigationScene] Started (Phase 3)');
     }
 
-    /**
-     * LoadUnit-based 비동기 시작.
-     *
-     * ArcanaLoadingOrchestrator를 사용하여 모든 LoadUnit을 실행:
-     * 1. FETCHING: DataFetchUnit (JSON/Graph)
-     * 2. BUILDING: TacticalGridUnit, GraphVisualizerUnit, LinkNetworkUnit, OctreeUnit
-     * 3. WARMING: MaterialWarmupUnit
-     * 4. BARRIER: RenderReadyBarrierUnit (첫 프레임 렌더 검증)
-     * 5. READY: 입력 활성화, 카메라 트랜지션 시작
-     */
     private async startAsync(): Promise<void> {
         const hooks = this.startHooks;
         const dbg = hooks?.dbg;
         const startTime = performance.now();
 
         try {
-            // === Reset previous run state ===
-            this.graph.clear();
-            this.pathStore.clear();
-            this.visualizer.dispose();
-            this.visualizer = new NavigationVisualizer(this.scene, this.graph);
-            this.activePath.dispose();
-            this.activePath = new ActivePathEffect(this.scene);
-            this.linkNetwork.dispose();
-            this.linkNetwork = new NavigationLinkNetwork(this.scene, this.graph);
+            // Reset state
+            this.tacticalDesign.clearAllNodes();
             this.disposeEnvironment();
             this.orchestrator?.dispose();
 
-            // === Create LoadUnit-based Orchestrator ===
+            // Create orchestrator
             this.orchestrator = new ArcanaLoadingOrchestrator(this.scene, {
                 enableCompressionAnimation: true,
                 barrierValidation: {
@@ -242,7 +240,6 @@ export class NavigationScene {
                 },
             });
 
-            // Subscribe to loading state for progress/UI updates
             this.orchestrator.subscribe({
                 onStateChange: (state) => {
                     this.currentPhase = state.phase;
@@ -253,7 +250,6 @@ export class NavigationScene {
                 },
                 onBarrierEnter: () => {
                     dbg?.begin('BARRIER');
-                    hooks?.onLog?.('[BARRIER] First frame render verification...');
                 },
                 onBarrierResolve: () => {
                     dbg?.end('BARRIER');
@@ -263,18 +259,22 @@ export class NavigationScene {
                 },
             });
 
-            // === Create and Register all LoadUnits ===
-            // Store EnvironmentUnit reference for disposal
+            // Create LoadUnits
             this.environmentUnit = new EnvironmentUnit({
                 stage: this.currentStage,
             });
 
-            this.orchestrator.registerUnits([
+            // Phase 3: Character LoadUnit
+            if (this.config.characterModelPath) {
+                this.characterLoadUnit = new CharacterLoadUnit({
+                    modelPath: this.config.characterModelPath,
+                    characterName: 'FlightCharacter',
+                    initialScale: 1,
+                });
+            }
+
+            const units: LoadUnit[] = [
                 // FETCHING phase
-                new DataFetchUnit({
-                    graph: this.graph,
-                    stage: this.currentStage,
-                }),
                 this.environmentUnit,
 
                 // BUILDING phase
@@ -282,19 +282,12 @@ export class NavigationScene {
                     hologram: this.hologram,
                     initialVisibility: 0,
                 }),
-                new GraphVisualizerUnit({
-                    visualizer: this.visualizer,
-                    graph: this.graph,
-                }),
-                new LinkNetworkUnit({
-                    linkNetwork: this.linkNetwork,
-                }),
                 new OctreeUnit(),
 
                 // WARMING phase
                 MaterialWarmupUnit.createNavigationWarmupUnit(),
 
-                // BARRIER phase - 렌더 루프 확인만 (시각 검증은 VISUAL_READY에서)
+                // BARRIER phase
                 RenderReadyBarrierUnit.createForNavigation({
                     requirements: [
                         {
@@ -304,40 +297,34 @@ export class NavigationScene {
                     ],
                 }),
 
-                // VISUAL_READY phase - TacticalGrid "보이기 시작" 검증
-                // [VISUAL_READY는 "보이기 시작했는지"만 검증]
-                // ✓ mesh 존재
-                // ✓ mesh.isEnabled() === true
-                // ✓ mesh.isVisible === true
-                // ❌ 안정성/완성도는 STABILIZING_100에서 검증
+                // VISUAL_READY phase
                 new VisualReadyUnit('nav-visual-ready', {
                     displayName: 'TacticalGrid Visual Verification',
                     requirements: [
                         createTacticalGridVisualRequirement(),
                     ],
                 }),
-            ]);
+            ];
 
-            // Attach environment after FETCHING phase (before BUILDING)
-            // This is handled by the EnvironmentUnit itself via attachToScene()
+            // Add character unit if configured
+            if (this.characterLoadUnit) {
+                units.splice(1, 0, this.characterLoadUnit);
+            }
 
-            // === Execute all LoadUnits via Orchestrator ===
+            this.orchestrator.registerUnits(units);
+
             dbg?.begin('LOADING');
 
             const result = await this.orchestrator.execute({
                 onLog: hooks?.onLog,
                 onReady: () => {
-                    // [READY] Phase reached - loading protocol complete
                     console.log('[READY] Loading complete, starting camera transition');
                     hooks?.onLog?.('[READY] reached');
 
-                    // Camera transition starts AFTER render-ready barrier passes
                     this.cameraController.transitionIn(LAYOUT.HOLOGRAM.GRID_SIZE / 2, () => {
-                        // Post-READY: wait 1 render frame before enabling input
-                        // This ensures all visual elements are fully stable
                         this.scene.onAfterRenderObservable.addOnce(() => {
                             this.inputLocked = false;
-                            console.log('[POST_READY] Input unlocked after 1 render frame');
+                            console.log('[POST_READY] Input unlocked');
                             hooks?.onLog?.('[POST_READY] input unlocked');
                             hooks?.onProgress?.(1);
                             hooks?.onReady?.();
@@ -350,9 +337,6 @@ export class NavigationScene {
             });
 
             dbg?.end('LOADING');
-
-            // Sync UI after all units complete
-            this.syncUI();
 
             const totalMs = performance.now() - startTime;
             hooks?.onLog?.(`[READY] Total loading time: ${Math.round(totalMs)}ms`);
@@ -369,18 +353,12 @@ export class NavigationScene {
         }
     }
 
-    /**
-     * Phase 전환 및 로깅
-     */
     private setPhase(phase: LoadingPhase, hooks?: NavigationStartHooks | null): void {
         this.currentPhase = phase;
         console.log(`[NavigationScene] Phase: ${phase}`);
         hooks?.onLog?.(`--- Phase: ${phase} ---`);
     }
 
-    /**
-     * Environment 정리
-     */
     private disposeEnvironment(): void {
         if (this.environmentUnit) {
             this.environmentUnit.dispose();
@@ -392,19 +370,24 @@ export class NavigationScene {
         if (!this.active) return;
         this.active = false;
         this.inputLocked = false;
+        this.isFlying = false;
         this.currentPhase = LoadingPhase.PENDING;
+
         this.orchestrator?.cancel();
         this.orchestrator?.dispose();
         this.orchestrator = null;
-        this.hud.hide();
-        this.activePath.dispose();
-        this.linkNetwork.dispose();
-        this.visualizer.dispose();
+
+        this.hud?.hide();
+        this.tacticalDesign.clearAllNodes();
         this.scanLine.dispose();
         this.hologram.dispose();
         this.disposeEnvironment();
-        this.pathStore.clear();
-        this.graph.clear();
+
+        if (this.characterLoadUnit) {
+            this.characterLoadUnit.dispose();
+            this.characterLoadUnit = null;
+        }
+
         this.restorePreviousCamera();
         console.log('[NavigationScene] Stopped');
     }
@@ -413,94 +396,290 @@ export class NavigationScene {
         return this.active;
     }
 
-    /**
-     * 현재 로딩 Phase 조회
-     */
     getCurrentPhase(): LoadingPhase {
         return this.currentPhase;
     }
 
     /**
-     * Handle a tap coming from InteractionLayer (HEBS).
+     * Handle tap from InteractionLayer
+     * Phase 3: Delegates to TacticalDesignController
      */
     handleTap(pointerX: number, pointerY: number): void {
         if (!this.active) return;
         if (this.inputLocked) return;
-        if (this.launched) return;
+        if (this.isFlying) return;
 
-        const pick = this.scene.pick(pointerX, pointerY, (m) => !!(m?.metadata as any)?.navNodeId);
-        const nodeId = this.visualizer.getNodeIdFromMesh(pick?.pickedMesh);
-        if (!nodeId) return;
-
-        const ok = this.pathStore.tryAppend(nodeId);
-        if (!ok) {
-            console.log('[NavigationScene] Invalid transition (no edge).', nodeId);
-            // 전략적 피드백은 HUD warning에 추가 가능 (Phase 2.1)
-            return;
-        }
-
-        // Arcana: spark burst at selection point
-        const node = this.graph.getNode(nodeId);
-        if (node) {
-            this.activePath.burstAt(node.position);
-        }
-
-        this.syncUI();
-    }
-
-    private syncUI(): void {
-        const state = this.pathStore.getState();
-        this.hud.update(state);
-        this.visualizer.setSelection(state.sequence, state.isOverBudget);
-
-        // Update active path effect
-        const points = this.pathStore.getPositions(this.scene);
-        this.activePath.setPath(points, { isInvalid: state.isOverBudget });
-    }
-
-    confirmAndLaunch(): void {
-        if (!this.active) return;
-        if (this.inputLocked) return;
-        if (this.launched) return;
-
-        const curve = this.getFlightCurve();
-        if (!curve) {
-            console.log('[NavigationScene] Confirm ignored: need at least 2 nodes.');
-            return;
-        }
-
-        this.launched = true;
-        this.inputLocked = true;
-
-        // Transition Out: dive with FOV pulse. Launch timing is synced near end.
-        let launchedOnce = false;
-        this.cameraController.transitionOut((progress01) => {
-            // At ~85%, trigger a visible "launch" preview (spark burst at curve start).
-            if (!launchedOnce && progress01 >= 0.85) {
-                launchedOnce = true;
-                const start = curve.getPoints()[0];
-                if (start) this.activePath.burstAt(start);
-            }
-        }, () => {
-            this.inputLocked = false;
-            console.log('[NavigationScene] Launch transition complete');
-        });
+        this.tacticalDesign.handleTap(pointerX, pointerY);
     }
 
     /**
-     * Phase 2 handoff: confirmed sequence as Curve3 in InGame coordinates.
+     * Clear all nodes
+     */
+    private clearPath(): void {
+        if (this.isFlying) return;
+        this.tacticalDesign.clearAllNodes();
+    }
+
+    /**
+     * Undo last node
+     */
+    private undoLastNode(): void {
+        if (this.isFlying) return;
+        this.tacticalDesign.removeLastNode();
+    }
+
+    /**
+     * Confirm path and launch flight
+     */
+    async confirmAndLaunch(): Promise<void> {
+        if (!this.active) return;
+        if (this.inputLocked) return;
+        if (this.isFlying) return;
+
+        const state = this.tacticalDesign.getState();
+        if (!state.canLaunch) {
+            console.log('[NavigationScene] Cannot launch: need at least 2 nodes');
+            return;
+        }
+
+        this.isFlying = true;
+        this.inputLocked = true;
+
+        // Lock tactical editing
+        this.tacticalDesign.lock();
+
+        // Get wind trail for launch animation
+        const windTrail = this.tacticalDesign.getWindTrail();
+
+        // Play launch animation
+        await windTrail.playLaunchAnimation(1000);
+
+        // Generate flight path
+        const path3D = this.tacticalDesign.generatePath3D();
+        if (!path3D) {
+            console.error('[NavigationScene] Failed to generate Path3D');
+            this.returnToDesign();
+            return;
+        }
+
+        // Get character if loaded
+        const character = this.characterLoadUnit?.getCharacter();
+        if (!character) {
+            console.log('[NavigationScene] No character loaded, simulating flight...');
+            // Simulate flight without character
+            await this.simulateFlight(path3D);
+        } else {
+            // Initialize and start flight
+            this.flightController.initialize(character, path3D);
+
+            // Play fly animation
+            this.characterLoadUnit?.playAnimation('Fly', true);
+
+            const result = await this.flightController.startFlight();
+            this.onFlightComplete(result);
+        }
+    }
+
+    private async simulateFlight(path3D: BABYLON.Path3D): Promise<void> {
+        // Simple camera fly-through for testing
+        const points = path3D.getPoints();
+        const duration = 3000; // 3 seconds
+        const startTime = performance.now();
+
+        return new Promise((resolve) => {
+            const observer = this.scene.onBeforeRenderObservable.add(() => {
+                const elapsed = performance.now() - startTime;
+                const t = Math.min(elapsed / duration, 1);
+
+                const pointIndex = Math.floor(t * (points.length - 1));
+                const position = points[pointIndex] ?? points[points.length - 1];
+
+                if (this.navigationCamera) {
+                    this.navigationCamera.target = position;
+                }
+
+                if (t >= 1) {
+                    this.scene.onBeforeRenderObservable.remove(observer);
+                    this.onFlightComplete({
+                        completed: true,
+                        totalTimeMs: duration,
+                        finalPosition: points[points.length - 1],
+                        aborted: false,
+                    });
+                    resolve();
+                }
+            });
+        });
+    }
+
+    private onFlightComplete(result: FlightResult): void {
+        console.log(`[NavigationScene] Flight ${result.completed ? 'completed' : 'aborted'} in ${Math.round(result.totalTimeMs)}ms`);
+
+        // Return to design phase
+        this.returnToDesign();
+
+        // Notify hooks
+        this.startHooks?.onLog?.(`Flight ${result.completed ? 'completed' : 'aborted'}`);
+    }
+
+    private returnToDesign(): void {
+        this.isFlying = false;
+        this.inputLocked = false;
+
+        // Unlock tactical editing
+        this.tacticalDesign.unlock();
+
+        // Reset wind trail mode
+        this.tacticalDesign.getWindTrail().setMode('design');
+
+        console.log('[NavigationScene] Returned to design phase');
+    }
+
+    /**
+     * Get flight path for external use
      */
     getFlightCurve(): BABYLON.Curve3 | null {
-        const tacticalPoints = this.pathStore.getPositions(this.scene);
-        if (tacticalPoints.length < 2) return null;
-        const inGamePoints = tacticalPoints.map((p) => this.mapper.tacticalToInGame(p));
-        // Catmull-Rom spline for smooth flight path
+        const positions = this.tacticalDesign.getNodePositions();
+        if (positions.length < 2) return null;
+
+        const inGamePoints = positions.map((p) => this.mapper.tacticalToInGame(p));
         return BABYLON.Curve3.CreateCatmullRomSpline(inGamePoints, 24, false);
     }
 
     dispose(): void {
         this.stop();
-        this.hud.dispose();
+        this.tacticalDesign.dispose();
+        this.flightController.dispose();
+        this.hud?.dispose();
     }
 }
 
+/**
+ * TacticalHUD - Phase 3 UI for tactical design
+ */
+class TacticalHUD {
+    private container: GUI.Rectangle;
+    private nodeCountText: GUI.TextBlock;
+    private statusText: GUI.TextBlock;
+    private clearButton: GUI.Button;
+    private undoButton: GUI.Button;
+    private confirmButton: GUI.Button;
+
+    constructor(
+        parent: GUI.Rectangle,
+        callbacks: {
+            onClear: () => void;
+            onUndo: () => void;
+            onConfirm: () => void;
+        }
+    ) {
+        // Container
+        this.container = new GUI.Rectangle('TacticalHUD');
+        this.container.width = '300px';
+        this.container.height = '150px';
+        this.container.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+        this.container.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        this.container.top = '20px';
+        this.container.left = '-20px';
+        this.container.background = 'rgba(0, 0, 0, 0.7)';
+        this.container.cornerRadius = 10;
+        this.container.thickness = 1;
+        this.container.color = 'rgba(100, 150, 255, 0.5)';
+        this.container.isVisible = false;
+        parent.addControl(this.container);
+
+        // Node count
+        this.nodeCountText = new GUI.TextBlock('nodeCount', 'Nodes: 0 / 15');
+        this.nodeCountText.height = '30px';
+        this.nodeCountText.top = '-40px';
+        this.nodeCountText.color = 'white';
+        this.nodeCountText.fontSize = 16;
+        this.container.addControl(this.nodeCountText);
+
+        // Status
+        this.statusText = new GUI.TextBlock('status', 'Tap to add nodes');
+        this.statusText.height = '25px';
+        this.statusText.top = '-10px';
+        this.statusText.color = 'rgba(150, 200, 255, 0.9)';
+        this.statusText.fontSize = 12;
+        this.container.addControl(this.statusText);
+
+        // Button container
+        const buttonPanel = new GUI.StackPanel('buttons');
+        buttonPanel.isVertical = false;
+        buttonPanel.height = '40px';
+        buttonPanel.top = '40px';
+        buttonPanel.spacing = 10;
+        this.container.addControl(buttonPanel);
+
+        // Clear button
+        this.clearButton = GUI.Button.CreateSimpleButton('clear', 'Clear');
+        this.clearButton.width = '70px';
+        this.clearButton.height = '35px';
+        this.clearButton.color = 'white';
+        this.clearButton.background = 'rgba(200, 50, 50, 0.8)';
+        this.clearButton.cornerRadius = 5;
+        this.clearButton.onPointerClickObservable.add(() => callbacks.onClear());
+        buttonPanel.addControl(this.clearButton);
+
+        // Undo button
+        this.undoButton = GUI.Button.CreateSimpleButton('undo', 'Undo');
+        this.undoButton.width = '70px';
+        this.undoButton.height = '35px';
+        this.undoButton.color = 'white';
+        this.undoButton.background = 'rgba(100, 100, 100, 0.8)';
+        this.undoButton.cornerRadius = 5;
+        this.undoButton.onPointerClickObservable.add(() => callbacks.onUndo());
+        buttonPanel.addControl(this.undoButton);
+
+        // Confirm/Launch button
+        this.confirmButton = GUI.Button.CreateSimpleButton('confirm', 'START');
+        this.confirmButton.width = '90px';
+        this.confirmButton.height = '35px';
+        this.confirmButton.color = 'white';
+        this.confirmButton.background = 'rgba(50, 150, 50, 0.8)';
+        this.confirmButton.cornerRadius = 5;
+        this.confirmButton.onPointerClickObservable.add(() => callbacks.onConfirm());
+        buttonPanel.addControl(this.confirmButton);
+    }
+
+    show(): void {
+        this.container.isVisible = true;
+    }
+
+    hide(): void {
+        this.container.isVisible = false;
+    }
+
+    updateState(state: TacticalDesignState): void {
+        this.nodeCountText.text = `Nodes: ${state.nodeCount} / ${state.maxNodes}`;
+
+        if (state.isLocked) {
+            this.statusText.text = 'Flight in progress...';
+            this.statusText.color = 'rgba(255, 200, 100, 0.9)';
+        } else if (state.canLaunch) {
+            this.statusText.text = 'Ready to launch!';
+            this.statusText.color = 'rgba(100, 255, 100, 0.9)';
+        } else if (state.nodeCount === 0) {
+            this.statusText.text = 'Tap to add nodes';
+            this.statusText.color = 'rgba(150, 200, 255, 0.9)';
+        } else {
+            this.statusText.text = 'Add at least 2 nodes';
+            this.statusText.color = 'rgba(255, 200, 100, 0.9)';
+        }
+
+        // Update button states
+        this.clearButton.isEnabled = state.nodeCount > 0 && !state.isLocked;
+        this.undoButton.isEnabled = state.nodeCount > 0 && !state.isLocked;
+        this.confirmButton.isEnabled = state.canLaunch;
+
+        // Visual feedback for disabled buttons
+        this.clearButton.alpha = this.clearButton.isEnabled ? 1 : 0.5;
+        this.undoButton.alpha = this.undoButton.isEnabled ? 1 : 0.5;
+        this.confirmButton.alpha = this.confirmButton.isEnabled ? 1 : 0.5;
+    }
+
+    dispose(): void {
+        this.container.dispose();
+    }
+}
