@@ -430,6 +430,9 @@ export function createTacticalGridVisualRequirement(): VisualRequirement {
         displayName: 'Tactical Grid',
 
         attach(scene: BABYLON.Scene): void {
+            // Prevent duplicate observer attachment
+            if (observer) return;
+
             // Reset state
             seenInRender = false;
 
@@ -440,31 +443,33 @@ export function createTacticalGridVisualRequirement(): VisualRequirement {
                 const mesh = scene.getMeshByName('TacticalGrid');
                 if (!mesh || mesh.isDisposed()) return;
 
-                const camera = scene.activeCamera;
-                if (!camera) return;
-
                 // Check if mesh is in renderable state
                 if (!mesh.isEnabled() || !mesh.isVisible) return;
+
+                const camera = scene.activeCamera;
+                if (!camera) return;
 
                 // Check if mesh is in camera frustum
                 const boundingInfo = mesh.getBoundingInfo();
                 if (!boundingInfo) return;
 
-                try {
-                    // isInFrustum checks if bounding box intersects camera frustum
-                    const frustumPlanes = scene.frustumPlanes;
+                // Use camera.getFrustumPlanes() for accurate frustum check
+                const frustumPlanes = (camera as BABYLON.Camera & { _getFrustumPlanes?: () => BABYLON.Plane[] })._getFrustumPlanes?.()
+                    ?? scene.frustumPlanes;
 
-                    if (frustumPlanes && frustumPlanes.length > 0 && boundingInfo.isInFrustum(frustumPlanes)) {
-                        seenInRender = true;
-                        console.log('[TacticalGridVisualRequirement] ✓ Rendered in camera frustum');
-                    }
-                } catch {
-                    // Fallback: if frustum check fails, check if mesh was in activeMeshes
-                    // This is a safety net, not the primary check
-                    const activeMeshes = scene.getActiveMeshes();
-                    if (activeMeshes.data.includes(mesh)) {
-                        seenInRender = true;
-                        console.log('[TacticalGridVisualRequirement] ✓ Found in activeMeshes (fallback)');
+                if (frustumPlanes && frustumPlanes.length > 0) {
+                    try {
+                        if (boundingInfo.isInFrustum(frustumPlanes)) {
+                            seenInRender = true;
+                            console.log('[TacticalGridVisualRequirement] ✓ Rendered in camera frustum');
+                        }
+                    } catch {
+                        // Fallback: check if mesh was processed in active meshes
+                        const activeMeshes = scene.getActiveMeshes();
+                        if (activeMeshes.data.includes(mesh)) {
+                            seenInRender = true;
+                            console.log('[TacticalGridVisualRequirement] ✓ Found in activeMeshes (fallback)');
+                        }
                     }
                 }
             });
@@ -473,11 +478,11 @@ export function createTacticalGridVisualRequirement(): VisualRequirement {
         },
 
         detach(scene: BABYLON.Scene): void {
-            if (observer) {
-                scene.onAfterRenderObservable.remove(observer);
-                observer = null;
-                console.log('[TacticalGridVisualRequirement] Detached render observer');
-            }
+            if (!observer) return;
+
+            scene.onAfterRenderObservable.remove(observer);
+            observer = null;
+            console.log('[TacticalGridVisualRequirement] Detached render observer');
         },
 
         validate(_scene: BABYLON.Scene): VisualValidationResult {
