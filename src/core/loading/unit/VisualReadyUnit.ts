@@ -169,6 +169,14 @@ export interface VisualReadyUnitConfig {
 
     /** Delay between validation attempts (ms) */
     attemptDelayMs?: number;
+
+    /**
+     * [TacticalGrid Incident Prevention]
+     * Minimum consecutive frames a requirement must pass before being considered valid.
+     * Single frame PASS is invalid - prevents GPU spike false positives.
+     * Default: 3
+     */
+    minConsecutiveFrames?: number;
 }
 
 /**
@@ -192,12 +200,20 @@ export class VisualReadyUnit implements LoadUnit {
     private validatedRequirements: Set<string> = new Set();
     private displayName: string;
 
+    /**
+     * [TacticalGrid Incident Prevention]
+     * Track consecutive frame successes per requirement.
+     * A requirement is only "validated" after N consecutive passes.
+     */
+    private consecutiveSuccessCount: Map<string, number> = new Map();
+
     constructor(id: string = 'visual-ready', config: VisualReadyUnitConfig) {
         this.id = id;
         this.displayName = config.displayName ?? 'Verifying Visuals';
         this.config = {
-            maxAttempts: 30,
+            maxAttempts: 60, // Increased for consecutive frame checking
             attemptDelayMs: 50,
+            minConsecutiveFrames: 3, // ❗ 한 프레임 PASS는 무효
             ...config,
         };
     }
@@ -211,6 +227,10 @@ export class VisualReadyUnit implements LoadUnit {
 
     /**
      * Execute visual validation for all requirements
+     *
+     * [TacticalGrid Incident Prevention]
+     * ❗ 한 프레임 PASS는 무효
+     * 각 requirement는 N 연속 프레임 성공 후에만 validated로 간주
      */
     async load(
         scene: BABYLON.Scene,
@@ -222,11 +242,13 @@ export class VisualReadyUnit implements LoadUnit {
 
         this.status = LoadUnitStatus.LOADING;
         this.validatedRequirements.clear();
+        this.consecutiveSuccessCount.clear();
         const startTime = performance.now();
 
         const requirements = this.config.requirements;
         const maxAttempts = this.config.maxAttempts!;
         const attemptDelayMs = this.config.attemptDelayMs!;
+        const minConsecutiveFrames = this.config.minConsecutiveFrames!;
 
         let attempt = 0;
 
@@ -234,20 +256,50 @@ export class VisualReadyUnit implements LoadUnit {
             while (attempt < maxAttempts) {
                 attempt++;
 
-                // Validate all requirements
+                // Validate all requirements with consecutive frame tracking
                 const pendingRequirements: VisualRequirement[] = [];
                 let allReady = true;
 
                 for (const req of requirements) {
                     if (this.validatedRequirements.has(req.id)) {
-                        continue; // Already validated
+                        continue; // Already validated (passed N consecutive frames)
                     }
 
                     const result = req.validate(scene);
+                    const currentCount = this.consecutiveSuccessCount.get(req.id) ?? 0;
+
                     if (result.ready) {
-                        this.validatedRequirements.add(req.id);
-                        console.log(`[VisualReadyUnit] ✓ ${req.displayName} ready`);
+                        const newCount = currentCount + 1;
+                        this.consecutiveSuccessCount.set(req.id, newCount);
+
+                        // [Constitutional Rule] Only mark as validated after N consecutive successes
+                        if (newCount >= minConsecutiveFrames) {
+                            this.validatedRequirements.add(req.id);
+                            console.log(
+                                `[VisualReadyUnit] ✓ ${req.displayName} ready ` +
+                                `(${newCount}/${minConsecutiveFrames} consecutive frames)`
+                            );
+                        } else {
+                            // Still building consecutive count
+                            pendingRequirements.push(req);
+                            allReady = false;
+
+                            if (attempt === 1 || attempt % 10 === 0) {
+                                console.log(
+                                    `[VisualReadyUnit] ⏳ ${req.displayName} ` +
+                                    `(${newCount}/${minConsecutiveFrames} consecutive frames)`
+                                );
+                            }
+                        }
                     } else {
+                        // Failed - reset consecutive count to 0
+                        if (currentCount > 0) {
+                            console.warn(
+                                `[VisualReadyUnit] ⚠ ${req.displayName} failed after ` +
+                                `${currentCount} consecutive successes: ${result.reason}`
+                            );
+                        }
+                        this.consecutiveSuccessCount.set(req.id, 0);
                         pendingRequirements.push(req);
                         allReady = false;
 
@@ -257,8 +309,18 @@ export class VisualReadyUnit implements LoadUnit {
                     }
                 }
 
-                // Report progress
-                const progress = this.validatedRequirements.size / requirements.length;
+                // Report progress (account for consecutive frame requirement)
+                const totalFramesNeeded = requirements.length * minConsecutiveFrames;
+                let totalFramesPassed = 0;
+                for (const req of requirements) {
+                    if (this.validatedRequirements.has(req.id)) {
+                        totalFramesPassed += minConsecutiveFrames;
+                    } else {
+                        totalFramesPassed += this.consecutiveSuccessCount.get(req.id) ?? 0;
+                    }
+                }
+                const progress = Math.min(1, totalFramesPassed / totalFramesNeeded);
+
                 onProgress?.({
                     progress,
                     message: allReady
@@ -269,7 +331,11 @@ export class VisualReadyUnit implements LoadUnit {
                 if (allReady) {
                     this.status = LoadUnitStatus.VALIDATED;
                     this.elapsedMs = performance.now() - startTime;
-                    console.log(`[VisualReadyUnit] All ${requirements.length} requirements validated in ${attempt} attempts, ${Math.round(this.elapsedMs)}ms`);
+                    console.log(
+                        `[VisualReadyUnit] All ${requirements.length} requirements validated ` +
+                        `in ${attempt} attempts, ${Math.round(this.elapsedMs)}ms ` +
+                        `(each required ${minConsecutiveFrames} consecutive frames)`
+                    );
                     return;
                 }
 
@@ -280,7 +346,10 @@ export class VisualReadyUnit implements LoadUnit {
             // Max attempts reached - report failure
             const pendingNames = this.config.requirements
                 .filter((r) => !this.validatedRequirements.has(r.id))
-                .map((r) => r.displayName)
+                .map((r) => {
+                    const count = this.consecutiveSuccessCount.get(r.id) ?? 0;
+                    return `${r.displayName} (${count}/${minConsecutiveFrames})`;
+                })
                 .join(', ');
 
             this.status = LoadUnitStatus.FAILED;
@@ -337,6 +406,7 @@ export class VisualReadyUnit implements LoadUnit {
         this.elapsedMs = undefined;
         this.error = undefined;
         this.validatedRequirements.clear();
+        this.consecutiveSuccessCount.clear();
     }
 
     /**
@@ -344,6 +414,7 @@ export class VisualReadyUnit implements LoadUnit {
      */
     dispose(): void {
         this.validatedRequirements.clear();
+        this.consecutiveSuccessCount.clear();
     }
 
     private delay(ms: number): Promise<void> {
@@ -353,6 +424,21 @@ export class VisualReadyUnit implements LoadUnit {
 
 /**
  * Factory for creating TacticalGrid visual requirement
+ *
+ * [TacticalGrid Incident Prevention - STRICTER VALIDATION]
+ *
+ * TacticalGridVisualUnit은 "가장 마지막 검증자"
+ *
+ * 이 조건 전부 충족해야 PASS:
+ * ✓ mesh.isVisible === true
+ * ✓ mesh.visibility > 0
+ * ✓ mesh.getWorldMatrix().determinant !== 0
+ * ✓ mesh.isReady(true)
+ * ✓ mesh.isEnabled()
+ * ✓ mesh has vertices
+ * ✓ mesh in scene.meshes
+ *
+ * ❗ 한 프레임 PASS는 무효 (연속 프레임 검증은 VisualReadyUnit level에서 처리)
  */
 export function createTacticalGridVisualRequirement(): VisualRequirement {
     return {
@@ -386,6 +472,17 @@ export function createTacticalGridVisualRequirement(): VisualRequirement {
             // visibility must be > 0 (no longer allowing 0 for VISUAL_READY phase)
             if (mesh.visibility <= 0) {
                 return { ready: false, reason: `TacticalGrid visibility = ${mesh.visibility}` };
+            }
+
+            // [NEW] World matrix determinant check - ensures valid transform
+            const determinant = mesh.getWorldMatrix().determinant();
+            if (determinant === 0) {
+                return { ready: false, reason: 'TacticalGrid worldMatrix determinant = 0 (invalid transform)' };
+            }
+
+            // [NEW] isReady check - ensures GPU resources are ready
+            if (!mesh.isReady(true)) {
+                return { ready: false, reason: 'TacticalGrid is not ready (GPU resources pending)' };
             }
 
             // Geometry check
