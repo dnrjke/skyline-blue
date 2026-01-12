@@ -20,6 +20,9 @@ import {
     MaterialWarmupUnit,
     RenderReadyBarrierUnit,
     BarrierRequirement,
+    // VISUAL_READY Phase (TacticalGrid Incident Prevention)
+    VisualReadyUnit,
+    createTacticalGridVisualRequirement,
 } from '../../../core/loading';
 import {
     DataFetchUnit,
@@ -291,9 +294,7 @@ export class NavigationScene {
                 // WARMING phase
                 MaterialWarmupUnit.createNavigationWarmupUnit(),
 
-                // BARRIER phase - 렌더링 준비 완료 검증
-                // TacticalGrid는 visibility=0으로 시작 (fade-in) → RENDER_READY 증거 사용
-                // RENDER_READY: 생성 완료 확인, visibility 무시 (의도적 0 허용)
+                // BARRIER phase - 렌더 루프 확인만 (시각 검증은 VISUAL_READY에서)
                 RenderReadyBarrierUnit.createForNavigation({
                     requirements: [
                         {
@@ -301,6 +302,22 @@ export class NavigationScene {
                             evidence: 'RENDER_READY',
                         } as BarrierRequirement,
                     ],
+                }),
+
+                // VISUAL_READY phase - TacticalGrid 실제 시각 검증
+                // [TacticalGrid Incident Prevention]
+                // ❗ 이 유닛이 없으면 과거 사고가 재발할 수 있음
+                // ✓ mesh.isVisible === true
+                // ✓ mesh.visibility > 0
+                // ✓ mesh.getWorldMatrix().determinant !== 0
+                // ✓ mesh.isReady(true)
+                // ✓ N 연속 프레임 성공 필수
+                new VisualReadyUnit('nav-visual-ready', {
+                    displayName: 'TacticalGrid Visual Verification',
+                    requirements: [
+                        createTacticalGridVisualRequirement(),
+                    ],
+                    minConsecutiveFrames: 3,
                 }),
             ]);
 
