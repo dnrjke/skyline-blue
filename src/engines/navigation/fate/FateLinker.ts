@@ -65,6 +65,37 @@ export class FateLinker {
         this.selectedMaterial.emissiveColor = new BABYLON.Color3(1.0, 0.8, 0.2); // Golden
         this.selectedMaterial.disableLighting = true;
         this.selectedMaterial.alpha = 1.0;
+
+        // [Babylon 8.x] Material warmup - precompile shaders
+        // See docs/babylon_rendering_rules.md Section 2
+        this.warmupMaterials();
+    }
+
+    /**
+     * Warmup materials by forcing shader compilation
+     * Prevents first-frame rendering failures in Babylon 8.x
+     */
+    private warmupMaterials(): void {
+        const dummy = BABYLON.MeshBuilder.CreateSphere(
+            '__FateNode_Warmup__',
+            { diameter: 0.01 },
+            this.scene
+        );
+        dummy.isVisible = false;
+
+        // Warmup normal material
+        dummy.material = this.normalMaterial;
+        this.normalMaterial.forceCompilationAsync(dummy).then(() => {
+            // Warmup selected material
+            dummy.material = this.selectedMaterial;
+            return this.selectedMaterial.forceCompilationAsync(dummy);
+        }).then(() => {
+            dummy.dispose();
+            console.log('[FateLinker] Materials precompiled');
+        }).catch((err) => {
+            console.warn('[FateLinker] Material warmup failed:', err);
+            dummy.dispose();
+        });
     }
 
     /**

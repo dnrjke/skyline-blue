@@ -78,6 +78,14 @@ export class FateNode {
         this.marker.position = BABYLON.Vector3.Zero();
         this.marker.material = this.normalMaterial;
 
+        // [Babylon 8.x Rendering Fix] Ensure mesh is included in active meshes
+        // See docs/babylon_rendering_rules.md
+        this.marker.layerMask = 0x0FFFFFFF;           // All layers
+        this.marker.alwaysSelectAsActiveMesh = true;  // Force active mesh inclusion
+        this.marker.renderingGroupId = 0;             // Default rendering group
+        this.marker.computeWorldMatrix(true);         // Force world matrix update
+        this.marker.refreshBoundingInfo(true);        // Force bounding info update
+
         // Metadata for picking
         this.marker.metadata = { fateNodeIndex: index };
         this.marker.isPickable = true;

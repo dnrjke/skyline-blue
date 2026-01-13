@@ -61,6 +61,40 @@ export class WindTrail {
         this.designMaterial = this.createDesignMaterial();
         this.launchMaterial = this.createLaunchMaterial();
         this.flightMaterial = this.createFlightMaterial();
+
+        // [Babylon 8.x] Material warmup
+        this.warmupMaterials();
+    }
+
+    /**
+     * Warmup materials by forcing shader compilation
+     */
+    private warmupMaterials(): void {
+        const dummy = BABYLON.MeshBuilder.CreateSphere(
+            '__WindTrail_Warmup__',
+            { diameter: 0.01 },
+            this.scene
+        );
+        dummy.isVisible = false;
+
+        dummy.material = this.designMaterial;
+        this.designMaterial.forceCompilationAsync(dummy)
+            .then(() => {
+                dummy.material = this.launchMaterial;
+                return this.launchMaterial.forceCompilationAsync(dummy);
+            })
+            .then(() => {
+                dummy.material = this.flightMaterial;
+                return this.flightMaterial.forceCompilationAsync(dummy);
+            })
+            .then(() => {
+                dummy.dispose();
+                console.log('[WindTrail] Materials precompiled');
+            })
+            .catch((err) => {
+                console.warn('[WindTrail] Material warmup failed:', err);
+                dummy.dispose();
+            });
     }
 
     private createDesignMaterial(): BABYLON.StandardMaterial {
@@ -154,9 +188,14 @@ export class WindTrail {
         // Apply current mode material
         this.tube.material = this.getMaterialForMode(this.currentMode);
 
-        // Ensure visibility
+        // [Babylon 8.x Rendering Fix] Ensure mesh is included in active meshes
+        // See docs/babylon_rendering_rules.md
         this.tube.isPickable = false;
         this.tube.layerMask = 0x0FFFFFFF;
+        this.tube.alwaysSelectAsActiveMesh = true;
+        this.tube.renderingGroupId = 0;
+        this.tube.computeWorldMatrix(true);
+        this.tube.refreshBoundingInfo(true);
     }
 
     private clearTube(): void {
@@ -247,7 +286,14 @@ export class WindTrail {
                         this.scene
                     );
                     this.tube.material = this.launchMaterial;
+
+                    // [Babylon 8.x Rendering Fix]
                     this.tube.isPickable = false;
+                    this.tube.layerMask = 0x0FFFFFFF;
+                    this.tube.alwaysSelectAsActiveMesh = true;
+                    this.tube.renderingGroupId = 0;
+                    this.tube.computeWorldMatrix(true);
+                    this.tube.refreshBoundingInfo(true);
                 }
 
                 // Animation complete
