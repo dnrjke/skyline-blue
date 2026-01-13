@@ -18,6 +18,12 @@ import { GizmoController } from '../fate/GizmoController';
 import { WindTrail } from '../fate/WindTrail';
 import type { FateNode } from '../fate/FateNode';
 
+/**
+ * Input modes for TacticalDesignController
+ * Separates camera control from node creation
+ */
+export type TacticalInputMode = 'camera' | 'design';
+
 export interface TacticalDesignConfig {
     /** Maximum nodes allowed */
     maxNodes?: number;
@@ -38,6 +44,8 @@ export interface TacticalDesignState {
     canAddNode: boolean;
     /** Can start flight (need at least 2 nodes) */
     canLaunch: boolean;
+    /** Current input mode */
+    inputMode: TacticalInputMode;
 }
 
 export interface TacticalDesignCallbacks {
@@ -71,6 +79,13 @@ export class TacticalDesignController {
     // State
     private isLocked: boolean = false;
     private disposed: boolean = false;
+    private inputMode: TacticalInputMode = 'design';
+
+    // Pointer tracking for tap detection
+    private pointerDownTime: number = 0;
+    private pointerDownPosition: { x: number; y: number } | null = null;
+    private readonly TAP_THRESHOLD_MS = 300;
+    private readonly TAP_MOVE_THRESHOLD = 10; // pixels
 
     // Callbacks
     private callbacks: TacticalDesignCallbacks = {};
@@ -201,16 +216,54 @@ export class TacticalDesignController {
     }
 
     /**
+     * Handle pointer down (for tap detection)
+     */
+    handlePointerDown(pointerX: number, pointerY: number): void {
+        this.pointerDownTime = performance.now();
+        this.pointerDownPosition = { x: pointerX, y: pointerY };
+    }
+
+    /**
+     * Handle pointer up (complete tap detection)
+     * Returns true if this was a valid tap
+     */
+    handlePointerUp(pointerX: number, pointerY: number): boolean {
+        if (!this.pointerDownPosition) return false;
+
+        const elapsed = performance.now() - this.pointerDownTime;
+        const dx = Math.abs(pointerX - this.pointerDownPosition.x);
+        const dy = Math.abs(pointerY - this.pointerDownPosition.y);
+        const moved = Math.sqrt(dx * dx + dy * dy);
+
+        // Reset tracking
+        this.pointerDownPosition = null;
+
+        // Check if this was a tap (quick, minimal movement)
+        if (elapsed > this.TAP_THRESHOLD_MS || moved > this.TAP_MOVE_THRESHOLD) {
+            return false; // This was a drag, not a tap
+        }
+
+        // Process as tap
+        this.handleTap(pointerX, pointerY);
+        return true;
+    }
+
+    /**
      * Handle tap on scene (select node or add new)
+     * Only processes in 'design' mode
      */
     handleTap(pointerX: number, pointerY: number): void {
         if (this.isLocked || this.disposed) return;
 
+        // In camera mode, don't process taps for node creation
+        if (this.inputMode === 'camera') return;
+
         // Don't process taps during gizmo drag
         if (this.gizmoController.isDragging()) return;
 
-        // Try to pick existing node
-        const pickResult = this.scene.pick(pointerX, pointerY, (mesh) => {
+        // Try to pick existing node in the UTILITY SCENE
+        const utilityScene = this.fateLinker.getUtilityScene();
+        const pickResult = utilityScene.pick(pointerX, pointerY, (mesh) => {
             return mesh.metadata?.fateNodeIndex !== undefined;
         });
 
@@ -281,7 +334,36 @@ export class TacticalDesignController {
             isLocked: this.isLocked,
             canAddNode: this.fateLinker.canAddNode() && !this.isLocked,
             canLaunch: this.fateLinker.getNodeCount() >= 2 && !this.isLocked,
+            inputMode: this.inputMode,
         };
+    }
+
+    /**
+     * Set input mode (camera or design)
+     * In camera mode, taps don't create nodes
+     * In design mode, taps create/select nodes
+     */
+    setInputMode(mode: TacticalInputMode): void {
+        if (this.inputMode === mode) return;
+        this.inputMode = mode;
+        this.notifyStateChange();
+        console.log(`[TacticalDesign] Input mode: ${mode}`);
+    }
+
+    /**
+     * Get current input mode
+     */
+    getInputMode(): TacticalInputMode {
+        return this.inputMode;
+    }
+
+    /**
+     * Toggle between camera and design modes
+     */
+    toggleInputMode(): TacticalInputMode {
+        const newMode = this.inputMode === 'camera' ? 'design' : 'camera';
+        this.setInputMode(newMode);
+        return newMode;
     }
 
     /**

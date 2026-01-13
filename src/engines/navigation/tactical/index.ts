@@ -9,4 +9,5 @@ export {
     type TacticalDesignConfig,
     type TacticalDesignState,
     type TacticalDesignCallbacks,
+    type TacticalInputMode,
 } from './TacticalDesignController';

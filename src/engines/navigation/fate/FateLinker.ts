@@ -20,6 +20,8 @@ export interface FateLinkerConfig {
     maxNodes?: number;
     /** Marker size (default: 0.5) */
     markerSize?: number;
+    /** External UtilityLayerRenderer (optional, will create own if not provided) */
+    utilityLayer?: BABYLON.UtilityLayerRenderer;
 }
 
 export interface FateLinkerCallbacks {
@@ -36,12 +38,17 @@ export interface FateLinkerCallbacks {
  * "Fate is chosen, not computed."
  */
 export class FateLinker {
-    private scene: BABYLON.Scene;
     private nodes: FateNode[] = [];
     private readonly MAX_NODES: number;
     private selectedIndex: number = -1;
 
-    // Materials (shared across all nodes)
+    // [Babylon 8.x] UtilityLayerScene for bypassing rendering pipeline
+    // See docs/babylon_rendering_rules.md Section 1
+    private utilityLayer: BABYLON.UtilityLayerRenderer;
+    private utilityScene: BABYLON.Scene;
+    private ownsUtilityLayer: boolean = false;
+
+    // Materials (shared across all nodes, created in utilityScene)
     private normalMaterial: BABYLON.StandardMaterial;
     private selectedMaterial: BABYLON.StandardMaterial;
 
@@ -52,16 +59,27 @@ export class FateLinker {
     private disposed: boolean = false;
 
     constructor(scene: BABYLON.Scene, config: FateLinkerConfig = {}) {
-        this.scene = scene;
         this.MAX_NODES = config.maxNodes ?? 15;
 
-        // Create shared materials
-        this.normalMaterial = new BABYLON.StandardMaterial('FateNode_Normal', scene);
+        // [Babylon 8.x] Create or use provided UtilityLayerRenderer
+        // UtilityLayerScene bypasses rendering pipeline's active mesh evaluation
+        if (config.utilityLayer) {
+            this.utilityLayer = config.utilityLayer;
+            this.ownsUtilityLayer = false;
+        } else {
+            this.utilityLayer = new BABYLON.UtilityLayerRenderer(scene);
+            this.utilityLayer.utilityLayerScene.autoClearDepthAndStencil = false;
+            this.ownsUtilityLayer = true;
+        }
+        this.utilityScene = this.utilityLayer.utilityLayerScene;
+
+        // Create shared materials IN THE UTILITY SCENE
+        this.normalMaterial = new BABYLON.StandardMaterial('FateNode_Normal', this.utilityScene);
         this.normalMaterial.emissiveColor = new BABYLON.Color3(0.3, 0.6, 1.0); // Soft blue
         this.normalMaterial.disableLighting = true;
         this.normalMaterial.alpha = 0.9;
 
-        this.selectedMaterial = new BABYLON.StandardMaterial('FateNode_Selected', scene);
+        this.selectedMaterial = new BABYLON.StandardMaterial('FateNode_Selected', this.utilityScene);
         this.selectedMaterial.emissiveColor = new BABYLON.Color3(1.0, 0.8, 0.2); // Golden
         this.selectedMaterial.disableLighting = true;
         this.selectedMaterial.alpha = 1.0;
@@ -69,6 +87,8 @@ export class FateLinker {
         // [Babylon 8.x] Material warmup - precompile shaders
         // See docs/babylon_rendering_rules.md Section 2
         this.warmupMaterials();
+
+        console.log('[FateLinker] Initialized with UtilityLayerScene bypass');
     }
 
     /**
@@ -79,7 +99,7 @@ export class FateLinker {
         const dummy = BABYLON.MeshBuilder.CreateSphere(
             '__FateNode_Warmup__',
             { diameter: 0.01 },
-            this.scene
+            this.utilityScene
         );
         dummy.isVisible = false;
 
@@ -91,7 +111,7 @@ export class FateLinker {
             return this.selectedMaterial.forceCompilationAsync(dummy);
         }).then(() => {
             dummy.dispose();
-            console.log('[FateLinker] Materials precompiled');
+            console.log('[FateLinker] Materials precompiled in UtilityScene');
         }).catch((err) => {
             console.warn('[FateLinker] Material warmup failed:', err);
             dummy.dispose();
@@ -117,8 +137,9 @@ export class FateLinker {
         }
 
         const index = this.nodes.length;
+        // Create node in UtilityScene to bypass rendering pipeline
         const node = new FateNode(
-            this.scene,
+            this.utilityScene,
             index,
             position,
             this.normalMaterial,
@@ -317,6 +338,13 @@ export class FateLinker {
     }
 
     /**
+     * Get the utility scene (for picking)
+     */
+    getUtilityScene(): BABYLON.Scene {
+        return this.utilityScene;
+    }
+
+    /**
      * Dispose all resources
      */
     dispose(): void {
@@ -326,6 +354,11 @@ export class FateLinker {
         this.clear();
         this.normalMaterial.dispose();
         this.selectedMaterial.dispose();
+
+        // Only dispose utility layer if we own it
+        if (this.ownsUtilityLayer) {
+            this.utilityLayer.dispose();
+        }
     }
 
     private notifyNodesChanged(): void {

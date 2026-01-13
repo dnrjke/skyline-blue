@@ -21,20 +21,27 @@ export interface WindTrailConfig {
     tessellation?: number;
     /** Spline subdivision (default: 20) */
     splineSubdivision?: number;
+    /** External UtilityLayerRenderer (optional, will create own if not provided) */
+    utilityLayer?: BABYLON.UtilityLayerRenderer;
 }
 
 /**
  * WindTrail - renders the visual path connecting FateNodes
  */
 export class WindTrail {
-    private scene: BABYLON.Scene;
-    private config: Required<WindTrailConfig>;
+    private mainScene: BABYLON.Scene;
+    private config: Required<Omit<WindTrailConfig, 'utilityLayer'>>;
+
+    // [Babylon 8.x] UtilityLayerScene for bypassing rendering pipeline
+    private utilityLayer: BABYLON.UtilityLayerRenderer;
+    private utilityScene: BABYLON.Scene;
+    private ownsUtilityLayer: boolean = false;
 
     // Visual elements
     private tube: BABYLON.Mesh | null = null;
     private path3D: BABYLON.Path3D | null = null;
 
-    // Materials for different modes
+    // Materials for different modes (created in utilityScene)
     private designMaterial: BABYLON.StandardMaterial;
     private launchMaterial: BABYLON.StandardMaterial;
     private flightMaterial: BABYLON.StandardMaterial;
@@ -50,20 +57,34 @@ export class WindTrail {
     private disposed: boolean = false;
 
     constructor(scene: BABYLON.Scene, config: WindTrailConfig = {}) {
-        this.scene = scene;
+        this.mainScene = scene;
         this.config = {
             tubeRadius: config.tubeRadius ?? 0.08,
             tessellation: config.tessellation ?? 16,
             splineSubdivision: config.splineSubdivision ?? 20,
         };
 
-        // Create materials
+        // [Babylon 8.x] Create or use provided UtilityLayerRenderer
+        // UtilityLayerScene bypasses rendering pipeline's active mesh evaluation
+        if (config.utilityLayer) {
+            this.utilityLayer = config.utilityLayer;
+            this.ownsUtilityLayer = false;
+        } else {
+            this.utilityLayer = new BABYLON.UtilityLayerRenderer(scene);
+            this.utilityLayer.utilityLayerScene.autoClearDepthAndStencil = false;
+            this.ownsUtilityLayer = true;
+        }
+        this.utilityScene = this.utilityLayer.utilityLayerScene;
+
+        // Create materials IN THE UTILITY SCENE
         this.designMaterial = this.createDesignMaterial();
         this.launchMaterial = this.createLaunchMaterial();
         this.flightMaterial = this.createFlightMaterial();
 
         // [Babylon 8.x] Material warmup
         this.warmupMaterials();
+
+        console.log('[WindTrail] Initialized with UtilityLayerScene bypass');
     }
 
     /**
@@ -73,7 +94,7 @@ export class WindTrail {
         const dummy = BABYLON.MeshBuilder.CreateSphere(
             '__WindTrail_Warmup__',
             { diameter: 0.01 },
-            this.scene
+            this.utilityScene
         );
         dummy.isVisible = false;
 
@@ -89,7 +110,7 @@ export class WindTrail {
             })
             .then(() => {
                 dummy.dispose();
-                console.log('[WindTrail] Materials precompiled');
+                console.log('[WindTrail] Materials precompiled in UtilityScene');
             })
             .catch((err) => {
                 console.warn('[WindTrail] Material warmup failed:', err);
@@ -98,7 +119,7 @@ export class WindTrail {
     }
 
     private createDesignMaterial(): BABYLON.StandardMaterial {
-        const mat = new BABYLON.StandardMaterial('WindTrail_Design', this.scene);
+        const mat = new BABYLON.StandardMaterial('WindTrail_Design', this.utilityScene);
         mat.emissiveColor = new BABYLON.Color3(1, 1, 1);
         mat.disableLighting = true;
         mat.alpha = 0.3;
@@ -107,7 +128,7 @@ export class WindTrail {
     }
 
     private createLaunchMaterial(): BABYLON.StandardMaterial {
-        const mat = new BABYLON.StandardMaterial('WindTrail_Launch', this.scene);
+        const mat = new BABYLON.StandardMaterial('WindTrail_Launch', this.utilityScene);
         mat.emissiveColor = new BABYLON.Color3(0.5, 0.8, 1.0);
         mat.disableLighting = true;
         mat.alpha = 0.9;
@@ -116,7 +137,7 @@ export class WindTrail {
     }
 
     private createFlightMaterial(): BABYLON.StandardMaterial {
-        const mat = new BABYLON.StandardMaterial('WindTrail_Flight', this.scene);
+        const mat = new BABYLON.StandardMaterial('WindTrail_Flight', this.utilityScene);
         mat.emissiveColor = new BABYLON.Color3(0.2, 0.6, 1.0);
         mat.disableLighting = true;
         mat.alpha = 0.6;
@@ -172,7 +193,7 @@ export class WindTrail {
 
         if (points.length < 2) return;
 
-        // Create tube mesh
+        // Create tube mesh in UtilityScene
         this.tube = BABYLON.MeshBuilder.CreateTube(
             'WindTrail_Tube',
             {
@@ -182,20 +203,14 @@ export class WindTrail {
                 cap: BABYLON.Mesh.CAP_ALL,
                 updatable: true,
             },
-            this.scene
+            this.utilityScene
         );
 
         // Apply current mode material
         this.tube.material = this.getMaterialForMode(this.currentMode);
 
-        // [Babylon 8.x Rendering Fix] Ensure mesh is included in active meshes
-        // See docs/babylon_rendering_rules.md
+        // UtilityScene bypasses pipeline, but still set basic properties
         this.tube.isPickable = false;
-        this.tube.layerMask = 0x0FFFFFFF;
-        this.tube.alwaysSelectAsActiveMesh = true;
-        this.tube.renderingGroupId = 0;
-        this.tube.computeWorldMatrix(true);
-        this.tube.refreshBoundingInfo(true);
     }
 
     private clearTube(): void {
@@ -262,8 +277,8 @@ export class WindTrail {
             // Clear current tube and animate rebuild
             this.clearTube();
 
-            // Animation loop
-            this.animationObserver = this.scene.onBeforeRenderObservable.add(() => {
+            // Animation loop (use mainScene for timing, meshes go to utilityScene)
+            this.animationObserver = this.mainScene.onBeforeRenderObservable.add(() => {
                 const elapsed = performance.now() - startTime;
                 this.launchProgress = Math.min(elapsed / durationMs, 1);
 
@@ -283,23 +298,16 @@ export class WindTrail {
                             cap: BABYLON.Mesh.CAP_ALL,
                             updatable: true,
                         },
-                        this.scene
+                        this.utilityScene
                     );
                     this.tube.material = this.launchMaterial;
-
-                    // [Babylon 8.x Rendering Fix]
                     this.tube.isPickable = false;
-                    this.tube.layerMask = 0x0FFFFFFF;
-                    this.tube.alwaysSelectAsActiveMesh = true;
-                    this.tube.renderingGroupId = 0;
-                    this.tube.computeWorldMatrix(true);
-                    this.tube.refreshBoundingInfo(true);
                 }
 
                 // Animation complete
                 if (this.launchProgress >= 1) {
                     if (this.animationObserver) {
-                        this.scene.onBeforeRenderObservable.remove(this.animationObserver);
+                        this.mainScene.onBeforeRenderObservable.remove(this.animationObserver);
                         this.animationObserver = null;
                     }
 
@@ -316,7 +324,7 @@ export class WindTrail {
      */
     stopAnimation(): void {
         if (this.animationObserver) {
-            this.scene.onBeforeRenderObservable.remove(this.animationObserver);
+            this.mainScene.onBeforeRenderObservable.remove(this.animationObserver);
             this.animationObserver = null;
         }
     }
@@ -343,5 +351,10 @@ export class WindTrail {
         this.designMaterial.dispose();
         this.launchMaterial.dispose();
         this.flightMaterial.dispose();
+
+        // Only dispose utility layer if we own it
+        if (this.ownsUtilityLayer) {
+            this.utilityLayer.dispose();
+        }
     }
 }

@@ -17,7 +17,7 @@ import { LAYOUT } from '../../../shared/design';
 import type { NavigationStartHooks } from '../NavigationEngine';
 
 // Phase 3: Fate-Linker System
-import { TacticalDesignController, type TacticalDesignState } from '../tactical';
+import { TacticalDesignController, type TacticalDesignState, type TacticalInputMode } from '../tactical';
 import { FlightController, type FlightResult } from '../flight';
 import { CoordinateMapper } from '../mapping/CoordinateMapper';
 
@@ -123,6 +123,7 @@ export class NavigationScene {
             onClear: () => this.clearPath(),
             onUndo: () => this.undoLastNode(),
             onConfirm: () => this.confirmAndLaunch(),
+            onModeToggle: () => this.toggleInputMode(),
         });
     }
 
@@ -401,7 +402,31 @@ export class NavigationScene {
     }
 
     /**
-     * Handle tap from InteractionLayer
+     * Handle pointer down from InteractionLayer
+     * Phase 3: Start tap detection
+     */
+    handlePointerDown(pointerX: number, pointerY: number): void {
+        if (!this.active) return;
+        if (this.inputLocked) return;
+        if (this.isFlying) return;
+
+        this.tacticalDesign.handlePointerDown(pointerX, pointerY);
+    }
+
+    /**
+     * Handle pointer up from InteractionLayer
+     * Phase 3: Complete tap detection
+     */
+    handlePointerUp(pointerX: number, pointerY: number): void {
+        if (!this.active) return;
+        if (this.inputLocked) return;
+        if (this.isFlying) return;
+
+        this.tacticalDesign.handlePointerUp(pointerX, pointerY);
+    }
+
+    /**
+     * Handle tap from InteractionLayer (legacy, kept for compatibility)
      * Phase 3: Delegates to TacticalDesignController
      */
     handleTap(pointerX: number, pointerY: number): void {
@@ -410,6 +435,27 @@ export class NavigationScene {
         if (this.isFlying) return;
 
         this.tacticalDesign.handleTap(pointerX, pointerY);
+    }
+
+    /**
+     * Set input mode (camera or design)
+     */
+    setInputMode(mode: TacticalInputMode): void {
+        this.tacticalDesign.setInputMode(mode);
+    }
+
+    /**
+     * Get current input mode
+     */
+    getInputMode(): TacticalInputMode {
+        return this.tacticalDesign.getInputMode();
+    }
+
+    /**
+     * Toggle input mode
+     */
+    toggleInputMode(): TacticalInputMode {
+        return this.tacticalDesign.toggleInputMode();
     }
 
     /**
@@ -561,6 +607,7 @@ class TacticalHUD {
     private container: GUI.Rectangle;
     private nodeCountText: GUI.TextBlock;
     private statusText: GUI.TextBlock;
+    private modeButton: GUI.Button;
     private clearButton: GUI.Button;
     private undoButton: GUI.Button;
     private confirmButton: GUI.Button;
@@ -571,6 +618,7 @@ class TacticalHUD {
             onClear: () => void;
             onUndo: () => void;
             onConfirm: () => void;
+            onModeToggle: () => void;
         }
     ) {
         // Container
@@ -603,6 +651,21 @@ class TacticalHUD {
         this.statusText.color = 'rgba(150, 200, 255, 0.9)';
         this.statusText.fontSize = 12;
         this.container.addControl(this.statusText);
+
+        // Mode button (separate from main buttons, positioned at top-left of container)
+        this.modeButton = GUI.Button.CreateSimpleButton('mode', 'Design');
+        this.modeButton.width = '80px';
+        this.modeButton.height = '28px';
+        this.modeButton.color = 'white';
+        this.modeButton.background = 'rgba(80, 120, 200, 0.9)';
+        this.modeButton.cornerRadius = 5;
+        this.modeButton.fontSize = 12;
+        this.modeButton.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+        this.modeButton.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        this.modeButton.top = '-55px';
+        this.modeButton.left = '10px';
+        this.modeButton.onPointerClickObservable.add(() => callbacks.onModeToggle());
+        this.container.addControl(this.modeButton);
 
         // Button container
         const buttonPanel = new GUI.StackPanel('buttons');
@@ -654,6 +717,16 @@ class TacticalHUD {
     updateState(state: TacticalDesignState): void {
         this.nodeCountText.text = `Nodes: ${state.nodeCount} / ${state.maxNodes}`;
 
+        // Update mode button
+        const isDesignMode = state.inputMode === 'design';
+        const modeTextBlock = this.modeButton.textBlock;
+        if (modeTextBlock) {
+            modeTextBlock.text = isDesignMode ? 'Design' : 'Camera';
+        }
+        this.modeButton.background = isDesignMode
+            ? 'rgba(80, 120, 200, 0.9)'   // Blue for design mode
+            : 'rgba(120, 80, 200, 0.9)';  // Purple for camera mode
+
         if (state.isLocked) {
             this.statusText.text = 'Flight in progress...';
             this.statusText.color = 'rgba(255, 200, 100, 0.9)';
@@ -661,7 +734,7 @@ class TacticalHUD {
             this.statusText.text = 'Ready to launch!';
             this.statusText.color = 'rgba(100, 255, 100, 0.9)';
         } else if (state.nodeCount === 0) {
-            this.statusText.text = 'Tap to add nodes';
+            this.statusText.text = isDesignMode ? 'Tap to add nodes' : 'Camera mode (tap Mode to edit)';
             this.statusText.color = 'rgba(150, 200, 255, 0.9)';
         } else {
             this.statusText.text = 'Add at least 2 nodes';
@@ -672,11 +745,13 @@ class TacticalHUD {
         this.clearButton.isEnabled = state.nodeCount > 0 && !state.isLocked;
         this.undoButton.isEnabled = state.nodeCount > 0 && !state.isLocked;
         this.confirmButton.isEnabled = state.canLaunch;
+        this.modeButton.isEnabled = !state.isLocked;
 
         // Visual feedback for disabled buttons
         this.clearButton.alpha = this.clearButton.isEnabled ? 1 : 0.5;
         this.undoButton.alpha = this.undoButton.isEnabled ? 1 : 0.5;
         this.confirmButton.alpha = this.confirmButton.isEnabled ? 1 : 0.5;
+        this.modeButton.alpha = this.modeButton.isEnabled ? 1 : 0.5;
     }
 
     dispose(): void {
