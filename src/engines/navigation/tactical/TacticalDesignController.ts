@@ -279,17 +279,62 @@ export class TacticalDesignController {
 
         // EDIT mode: only select existing nodes
         if (this.inputMode === 'edit') {
-            const utilityScene = this.fateLinker.getUtilityScene();
-            const pickResult = utilityScene.pick(pointerX, pointerY, (mesh) => {
-                return mesh.metadata?.fateNodeIndex !== undefined;
-            });
+            // [DEBUG] Log pick attempt
+            console.log(`[TacticalDesign] Edit mode - picking at (${pointerX}, ${pointerY})`);
 
-            if (pickResult?.hit && pickResult.pickedMesh) {
-                const node = this.fateLinker.findNodeByMesh(pickResult.pickedMesh);
-                if (node) {
-                    this.fateLinker.selectNode(node.index);
-                    console.log(`[TacticalDesign] Edit mode - selected node ${node.index}`);
+            // Create picking ray from MAIN scene camera
+            const camera = this.camera ?? this.scene.activeCamera;
+            if (!camera) {
+                console.warn('[TacticalDesign] No camera for picking');
+                return;
+            }
+
+            const ray = this.scene.createPickingRay(
+                pointerX,
+                pointerY,
+                BABYLON.Matrix.Identity(),
+                camera
+            );
+
+            // [DEBUG] Log ray info
+            console.log('[TacticalDesign] Pick ray:', ray.origin.toString(), ray.direction.toString());
+
+            // Manual intersection test against all nodes
+            const nodes = this.fateLinker.getAllNodes();
+            let closestNode: FateNode | null = null;
+            let closestDistance = Infinity;
+
+            for (const node of nodes) {
+                // Get world position of the node marker
+                const markerWorldPos = node.anchor.position;
+                const markerRadius = 0.25; // Half of diameter 0.5
+
+                // Ray-sphere intersection
+                const toMarker = markerWorldPos.subtract(ray.origin);
+                const tca = BABYLON.Vector3.Dot(toMarker, ray.direction);
+
+                if (tca < 0) continue; // Marker is behind ray origin
+
+                const d2 = BABYLON.Vector3.Dot(toMarker, toMarker) - tca * tca;
+                const r2 = markerRadius * markerRadius * 4; // Larger hit area for touch
+
+                if (d2 > r2) continue; // Ray misses sphere
+
+                const thc = Math.sqrt(r2 - d2);
+                const t = tca - thc;
+
+                if (t > 0 && t < closestDistance) {
+                    closestDistance = t;
+                    closestNode = node;
                 }
+            }
+
+            // [DEBUG] Log result
+            console.log(`[TacticalDesign] Pick result: ${closestNode ? `node ${closestNode.index}` : 'none'}`);
+
+            if (closestNode) {
+                this.fateLinker.selectNode(closestNode.index);
+                console.log(`[TacticalDesign] Edit mode - selected node ${closestNode.index}`);
             } else {
                 // Tap on empty space in edit mode: deselect
                 this.fateLinker.deselectAll();
