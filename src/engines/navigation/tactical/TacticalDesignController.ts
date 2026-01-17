@@ -20,9 +20,15 @@ import type { FateNode } from '../fate/FateNode';
 
 /**
  * Input modes for TacticalDesignController
- * Separates camera control from node creation
+ *
+ * CRITICAL: These modes are MUTUALLY EXCLUSIVE
+ * Only ONE type of input is processed per mode
+ *
+ * - camera: Camera movement ONLY. No node creation, no selection.
+ * - place: Node placement ONLY. Tap creates node. Camera drag blocked.
+ * - edit: Gizmo manipulation ONLY. Select existing nodes. Gizmo drag.
  */
-export type TacticalInputMode = 'camera' | 'design';
+export type TacticalInputMode = 'camera' | 'place' | 'edit';
 
 export interface TacticalDesignConfig {
     /** Maximum nodes allowed */
@@ -79,7 +85,7 @@ export class TacticalDesignController {
     // State
     private isLocked: boolean = false;
     private disposed: boolean = false;
-    private inputMode: TacticalInputMode = 'design';
+    private inputMode: TacticalInputMode = 'place'; // Default: node placement mode
 
     // Pointer tracking for tap detection
     private pointerDownTime: number = 0;
@@ -212,26 +218,6 @@ export class TacticalDesignController {
         const worldPos = ray.origin.add(ray.direction.scale(distance));
         worldPos.y = this.config.defaultNodeHeight;
 
-        // [DEBUG] Create debug sphere in MAIN SCENE to test visibility
-        const debugSphere = BABYLON.MeshBuilder.CreateSphere(
-            'DEBUG_NODE_' + Date.now(),
-            { diameter: 0.5 },
-            this.scene
-        );
-        debugSphere.position.copyFrom(worldPos);
-        debugSphere.isVisible = true;
-        debugSphere.setEnabled(true);
-        debugSphere.layerMask = 0xFFFFFFFF;
-
-        const debugMat = new BABYLON.StandardMaterial('debugMat_' + Date.now(), this.scene);
-        debugMat.diffuseColor = new BABYLON.Color3(1, 0, 0);
-        debugMat.emissiveColor = new BABYLON.Color3(1, 0, 0);
-        debugMat.disableLighting = true;
-        debugSphere.material = debugMat;
-
-        console.log('[DEBUG] DEBUG_NODE created at:', worldPos.toString(), debugSphere);
-        // [/DEBUG]
-
         return this.addNodeAtPosition(worldPos);
     }
 
@@ -269,36 +255,58 @@ export class TacticalDesignController {
     }
 
     /**
-     * Handle tap on scene (select node or add new)
-     * Only processes in 'design' mode
+     * Handle tap on scene
+     *
+     * Mode-specific behavior:
+     * - camera: NO processing (camera handles input)
+     * - place: Create new node at tap position (no selection)
+     * - edit: Select existing node (no creation)
      */
     handleTap(pointerX: number, pointerY: number): void {
         if (this.isLocked || this.disposed) return;
 
-        // In camera mode, don't process taps for node creation
-        if (this.inputMode === 'camera') return;
-
-        // Don't process taps during gizmo drag
-        if (this.gizmoController.isDragging()) return;
-
-        // Try to pick existing node in the UTILITY SCENE
-        const utilityScene = this.fateLinker.getUtilityScene();
-        const pickResult = utilityScene.pick(pointerX, pointerY, (mesh) => {
-            return mesh.metadata?.fateNodeIndex !== undefined;
-        });
-
-        if (pickResult?.hit && pickResult.pickedMesh) {
-            // Selected existing node
-            const node = this.fateLinker.findNodeByMesh(pickResult.pickedMesh);
-            if (node) {
-                this.fateLinker.selectNode(node.index);
-                return;
-            }
+        // Camera mode: no tap processing
+        if (this.inputMode === 'camera') {
+            console.log('[TacticalDesign] Camera mode - tap ignored');
+            return;
         }
 
-        // No node picked - add new node at position
-        if (this.fateLinker.canAddNode()) {
-            this.addNodeAtScreenPosition(pointerX, pointerY);
+        // Don't process taps during gizmo drag
+        if (this.gizmoController.isDragging()) {
+            console.log('[TacticalDesign] Gizmo dragging - tap ignored');
+            return;
+        }
+
+        // EDIT mode: only select existing nodes
+        if (this.inputMode === 'edit') {
+            const utilityScene = this.fateLinker.getUtilityScene();
+            const pickResult = utilityScene.pick(pointerX, pointerY, (mesh) => {
+                return mesh.metadata?.fateNodeIndex !== undefined;
+            });
+
+            if (pickResult?.hit && pickResult.pickedMesh) {
+                const node = this.fateLinker.findNodeByMesh(pickResult.pickedMesh);
+                if (node) {
+                    this.fateLinker.selectNode(node.index);
+                    console.log(`[TacticalDesign] Edit mode - selected node ${node.index}`);
+                }
+            } else {
+                // Tap on empty space in edit mode: deselect
+                this.fateLinker.deselectAll();
+                console.log('[TacticalDesign] Edit mode - deselected all');
+            }
+            return;
+        }
+
+        // PLACE mode: only create new nodes
+        if (this.inputMode === 'place') {
+            if (this.fateLinker.canAddNode()) {
+                this.addNodeAtScreenPosition(pointerX, pointerY);
+                console.log('[TacticalDesign] Place mode - node added');
+            } else {
+                console.log('[TacticalDesign] Place mode - max nodes reached');
+            }
+            return;
         }
     }
 
@@ -359,15 +367,28 @@ export class TacticalDesignController {
     }
 
     /**
-     * Set input mode (camera or design)
-     * In camera mode, taps don't create nodes
-     * In design mode, taps create/select nodes
+     * Set input mode
+     *
+     * Mode transitions:
+     * - camera: Deselect all nodes, detach gizmo
+     * - place: Deselect all nodes, detach gizmo
+     * - edit: Ready for node selection
      */
     setInputMode(mode: TacticalInputMode): void {
         if (this.inputMode === mode) return;
+
+        const prevMode = this.inputMode;
         this.inputMode = mode;
+
+        // Mode transition logic
+        if (mode === 'camera' || mode === 'place') {
+            // Camera/Place: detach gizmo, deselect
+            this.gizmoController.detach();
+            this.fateLinker.deselectAll();
+        }
+
         this.notifyStateChange();
-        console.log(`[TacticalDesign] Input mode: ${mode}`);
+        console.log(`[TacticalDesign] Input mode: ${prevMode} → ${mode}`);
     }
 
     /**
@@ -378,10 +399,23 @@ export class TacticalDesignController {
     }
 
     /**
-     * Toggle between camera and design modes
+     * Cycle through input modes: camera → place → edit → camera
+     */
+    cycleInputMode(): TacticalInputMode {
+        const order: TacticalInputMode[] = ['camera', 'place', 'edit'];
+        const currentIndex = order.indexOf(this.inputMode);
+        const nextIndex = (currentIndex + 1) % order.length;
+        const newMode = order[nextIndex];
+        this.setInputMode(newMode);
+        return newMode;
+    }
+
+    /**
+     * Toggle between camera and place modes (legacy compatibility)
+     * @deprecated Use cycleInputMode() instead
      */
     toggleInputMode(): TacticalInputMode {
-        const newMode = this.inputMode === 'camera' ? 'design' : 'camera';
+        const newMode = this.inputMode === 'camera' ? 'place' : 'camera';
         this.setInputMode(newMode);
         return newMode;
     }
