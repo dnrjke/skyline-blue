@@ -452,10 +452,17 @@ export class NavigationScene {
     }
 
     /**
-     * Toggle input mode
+     * Cycle through input modes: camera → place → edit → camera
+     */
+    cycleInputMode(): TacticalInputMode {
+        return this.tacticalDesign.cycleInputMode();
+    }
+
+    /**
+     * Toggle input mode (legacy - use cycleInputMode)
      */
     toggleInputMode(): TacticalInputMode {
-        return this.tacticalDesign.toggleInputMode();
+        return this.tacticalDesign.cycleInputMode();
     }
 
     /**
@@ -717,28 +724,61 @@ class TacticalHUD {
     updateState(state: TacticalDesignState): void {
         this.nodeCountText.text = `Nodes: ${state.nodeCount} / ${state.maxNodes}`;
 
-        // Update mode button
-        const isDesignMode = state.inputMode === 'design';
+        // Update mode button with 3-state display
         const modeTextBlock = this.modeButton.textBlock;
         if (modeTextBlock) {
-            modeTextBlock.text = isDesignMode ? 'Design' : 'Camera';
+            switch (state.inputMode) {
+                case 'camera':
+                    modeTextBlock.text = 'Camera';
+                    break;
+                case 'place':
+                    modeTextBlock.text = 'Place';
+                    break;
+                case 'edit':
+                    modeTextBlock.text = 'Edit';
+                    break;
+            }
         }
-        this.modeButton.background = isDesignMode
-            ? 'rgba(80, 120, 200, 0.9)'   // Blue for design mode
-            : 'rgba(120, 80, 200, 0.9)';  // Purple for camera mode
 
+        // Mode-specific colors
+        switch (state.inputMode) {
+            case 'camera':
+                this.modeButton.background = 'rgba(120, 80, 200, 0.9)';  // Purple
+                break;
+            case 'place':
+                this.modeButton.background = 'rgba(80, 180, 80, 0.9)';   // Green
+                break;
+            case 'edit':
+                this.modeButton.background = 'rgba(200, 150, 50, 0.9)';  // Gold
+                break;
+        }
+
+        // Update status text based on mode
         if (state.isLocked) {
             this.statusText.text = 'Flight in progress...';
             this.statusText.color = 'rgba(255, 200, 100, 0.9)';
         } else if (state.canLaunch) {
             this.statusText.text = 'Ready to launch!';
             this.statusText.color = 'rgba(100, 255, 100, 0.9)';
-        } else if (state.nodeCount === 0) {
-            this.statusText.text = isDesignMode ? 'Tap to add nodes' : 'Camera mode (tap Mode to edit)';
-            this.statusText.color = 'rgba(150, 200, 255, 0.9)';
         } else {
-            this.statusText.text = 'Add at least 2 nodes';
-            this.statusText.color = 'rgba(255, 200, 100, 0.9)';
+            switch (state.inputMode) {
+                case 'camera':
+                    this.statusText.text = 'Camera mode (drag to rotate)';
+                    this.statusText.color = 'rgba(200, 150, 255, 0.9)';
+                    break;
+                case 'place':
+                    this.statusText.text = state.nodeCount === 0
+                        ? 'Tap to add nodes'
+                        : `Add ${Math.max(0, 2 - state.nodeCount)} more nodes`;
+                    this.statusText.color = 'rgba(150, 255, 150, 0.9)';
+                    break;
+                case 'edit':
+                    this.statusText.text = state.selectedIndex >= 0
+                        ? `Editing node ${state.selectedIndex}`
+                        : 'Tap a node to edit';
+                    this.statusText.color = 'rgba(255, 220, 100, 0.9)';
+                    break;
+            }
         }
 
         // Update button states
