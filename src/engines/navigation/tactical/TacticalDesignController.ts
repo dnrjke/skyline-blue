@@ -212,6 +212,26 @@ export class TacticalDesignController {
         const worldPos = ray.origin.add(ray.direction.scale(distance));
         worldPos.y = this.config.defaultNodeHeight;
 
+        // [DEBUG] Create debug sphere in MAIN SCENE to test visibility
+        const debugSphere = BABYLON.MeshBuilder.CreateSphere(
+            'DEBUG_NODE_' + Date.now(),
+            { diameter: 0.5 },
+            this.scene
+        );
+        debugSphere.position.copyFrom(worldPos);
+        debugSphere.isVisible = true;
+        debugSphere.setEnabled(true);
+        debugSphere.layerMask = 0xFFFFFFFF;
+
+        const debugMat = new BABYLON.StandardMaterial('debugMat_' + Date.now(), this.scene);
+        debugMat.diffuseColor = new BABYLON.Color3(1, 0, 0);
+        debugMat.emissiveColor = new BABYLON.Color3(1, 0, 0);
+        debugMat.disableLighting = true;
+        debugSphere.material = debugMat;
+
+        console.log('[DEBUG] DEBUG_NODE created at:', worldPos.toString(), debugSphere);
+        // [/DEBUG]
+
         return this.addNodeAtPosition(worldPos);
     }
 
