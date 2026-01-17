@@ -631,7 +631,7 @@ class TacticalHUD {
         // Container
         this.container = new GUI.Rectangle('TacticalHUD');
         this.container.width = '300px';
-        this.container.height = '150px';
+        this.container.height = '180px';  // Increased to fit mode button
         this.container.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
         this.container.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
         this.container.top = '20px';
@@ -643,10 +643,25 @@ class TacticalHUD {
         this.container.isVisible = false;
         parent.addControl(this.container);
 
+        // Mode button (at top of container)
+        this.modeButton = GUI.Button.CreateSimpleButton('mode', 'Place');
+        this.modeButton.width = '80px';
+        this.modeButton.height = '28px';
+        this.modeButton.color = 'white';
+        this.modeButton.background = 'rgba(80, 180, 80, 0.9)';  // Green for place mode
+        this.modeButton.cornerRadius = 5;
+        this.modeButton.fontSize = 12;
+        this.modeButton.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+        this.modeButton.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        this.modeButton.top = '10px';
+        this.modeButton.left = '10px';
+        this.modeButton.onPointerClickObservable.add(() => callbacks.onModeToggle());
+        this.container.addControl(this.modeButton);
+
         // Node count
         this.nodeCountText = new GUI.TextBlock('nodeCount', 'Nodes: 0 / 15');
         this.nodeCountText.height = '30px';
-        this.nodeCountText.top = '-40px';
+        this.nodeCountText.top = '-20px';  // Adjusted
         this.nodeCountText.color = 'white';
         this.nodeCountText.fontSize = 16;
         this.container.addControl(this.nodeCountText);
@@ -654,31 +669,16 @@ class TacticalHUD {
         // Status
         this.statusText = new GUI.TextBlock('status', 'Tap to add nodes');
         this.statusText.height = '25px';
-        this.statusText.top = '-10px';
+        this.statusText.top = '10px';  // Adjusted
         this.statusText.color = 'rgba(150, 200, 255, 0.9)';
         this.statusText.fontSize = 12;
         this.container.addControl(this.statusText);
 
-        // Mode button (separate from main buttons, positioned at top-left of container)
-        this.modeButton = GUI.Button.CreateSimpleButton('mode', 'Design');
-        this.modeButton.width = '80px';
-        this.modeButton.height = '28px';
-        this.modeButton.color = 'white';
-        this.modeButton.background = 'rgba(80, 120, 200, 0.9)';
-        this.modeButton.cornerRadius = 5;
-        this.modeButton.fontSize = 12;
-        this.modeButton.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
-        this.modeButton.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
-        this.modeButton.top = '-55px';
-        this.modeButton.left = '10px';
-        this.modeButton.onPointerClickObservable.add(() => callbacks.onModeToggle());
-        this.container.addControl(this.modeButton);
-
-        // Button container
+        // Button container (at bottom of HUD)
         const buttonPanel = new GUI.StackPanel('buttons');
         buttonPanel.isVertical = false;
         buttonPanel.height = '40px';
-        buttonPanel.top = '40px';
+        buttonPanel.top = '60px';  // Adjusted for new layout
         buttonPanel.spacing = 10;
         this.container.addControl(buttonPanel);
 
