@@ -5,12 +5,23 @@
  *
  * Phase Flow (Final Form):
  *   FETCHING → BUILDING → WARMING → BARRIER
- *           → VISUAL_READY → STABILIZING_100 → READY
+ *           → VISUAL_READY → STABILIZING_100 → READY → [POST_READY]
  *
  * Key Rules:
- * - BARRIER → READY 직접 전이 금지
- * - VISUAL_READY에서 실제 시각 요소 검증
- * - STABILIZING_100에서 안정화 홀드
+ * - BARRIER → READY 직접 전이 금지 (Constitutional)
+ * - VISUAL_READY에서 실제 시각 요소 검증 (frustum-based)
+ * - STABILIZING_100에서 안정화 홀드 (300ms/30frames)
+ * - POST_READY: READY 후 +1 render frame 대기 후 input unlock
+ *
+ * VisualRequirement Lifecycle:
+ * - attach(): 검증 시작 시 observer 등록
+ * - validate(): 매 폴링마다 호출 (ready: true/false)
+ * - detach(): VISUAL_READY 완료 후 observer 정리
+ *
+ * Frustum-based Detection:
+ * - Scene Explorer 등록 ≠ 카메라 시야 내 렌더링
+ * - boundingInfo.isInFrustum(frustumPlanes) 사용
+ * - onAfterRenderObservable 내에서만 검증
  *
  * 사용법:
  * ```typescript
@@ -24,7 +35,7 @@
  * });
  *
  * if (result.phase === LoadingPhase.READY) {
- *   // 게임 시작
+ *   // POST_READY: 1 render frame 후 input 활성화
  * }
  * ```
  */
@@ -322,16 +333,28 @@ export class LoadingProtocol {
             await this.barrier.waitForFirstFrame(barrierValidation);
         }
 
-        // 3. 최종 검증 - 모든 Required Unit이 VALIDATED인지 확인
-        if (!this.registry.areAllRequiredValidated()) {
-            const notValidated = this.registry
-                .getRequiredUnits()
-                .filter((u) => u.status !== LoadUnitStatus.VALIDATED && u.status !== LoadUnitStatus.SKIPPED)
-                .map((u) => `${u.id}(${u.status})`);
-            throw new Error(`Not all required units validated: ${notValidated.join(', ')}`);
+        // 3. 최종 검증 - BARRIER 이전 phase의 Required Unit이 VALIDATED인지 확인
+        // [NOTE] VISUAL_READY, STABILIZING_100 유닛은 아직 실행 전이므로 제외
+        const preVisualPhases = [
+            LoadingPhase.FETCHING,
+            LoadingPhase.BUILDING,
+            LoadingPhase.WARMING,
+            LoadingPhase.BARRIER,
+        ];
+
+        const preVisualRequired = this.registry
+            .getRequiredUnits()
+            .filter((u) => preVisualPhases.includes(u.phase));
+
+        const notValidated = preVisualRequired
+            .filter((u) => u.status !== LoadUnitStatus.VALIDATED && u.status !== LoadUnitStatus.SKIPPED)
+            .map((u) => `${u.id}(${u.status})`);
+
+        if (notValidated.length > 0) {
+            throw new Error(`Not all pre-visual required units validated: ${notValidated.join(', ')}`);
         }
 
-        options.onProgress?.(0.95);
+        options.onProgress?.(0.90);
     }
 
     /**

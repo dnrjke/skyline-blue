@@ -235,19 +235,21 @@ Narrative Engine 디렉터리를 단독으로 복사해도 컴파일 가능
 Main(App)에서 엔진을 생성·연결하는 구조가 명확할 것
 기존 Phase 1 기능(타이핑, 스킵, 진행)이 동일하게 동작할 것
 
-### Phase 2: Path Planning Logic
-- 목표: '항로 설정 게임' 기능 구현.
-- 구현: 3D 노드 배치, 노드 간 연결(클릭), 다익스트라 경로 계산 및 시각화.
-- 검증: 선택한 노드 순서대로 데이터가 저장되고 다음 페이즈로 전달되는가?
+### Phase 2: Path Planning Logic (DEPRECATED → Legacy)
+- 상태: Legacy 격리 대상
+- 원래 목표: '항로 설정 게임' 기능 구현 (다익스트라 기반)
+- **⚠️ 이 Phase의 자동 경로 로직은 Phase 3에서 완전히 대체됨**
+- Legacy 코드는 `src/engines/navigation/legacy/` 로 격리 이동 예정
+- AI 라이벌, 자동 추천 기능을 위한 "참고용 보관" 목적
 
 ### Phase 2.3: Smart Refactoring & Architecture
 [총 의도] 하드코딩된 경로와 파일 참조를 완전히 제거하고, 모든 리소스를 디렉터리 변수 및 에셋 맵을 통해 관리한다. 이는 향후 맵 확장, 에셋 교체, 유지보수 효율성을 극대화하기 위함이다.
 
-### Phase 2.5: 환경 정비 및 로딩/디버깅 통합 엔진 구축 (Current)
+### Phase 2.5: 환경 정비 및 로딩/디버깅 통합 엔진 구축
 [총 의도]
 - 프로젝트의 기술 부채(특히 인코딩/낡은 문서)를 청산한다.
 - 거대 맵 로딩의 불쾌함(잔상/지루함)을 해소한다.
-- 로딩 성능을 “가시화”하는 Arcana Loading & Debugger 시스템을 구축한다.
+- 로딩 성능을 "가시화"하는 Arcana Loading & Debugger 시스템을 구축한다.
 
 [핵심 구성요소]
 - Core 렌더 품질 인프라: `src/core/rendering/RenderQualityManager.ts`
@@ -259,12 +261,124 @@ Main(App)에서 엔진을 생성·연결하는 구조가 명확할 것
 - 엔진 전환 시 로딩 오버레이가 뜨고, 단계별(ms) 로그가 출력된다.
 - 로딩 완료 후 0.5초 페이드아웃 후에만 오버레이가 사라진다.
 
-### Phase 3: Path Planning UI Polish
+---
+
+### Phase 3: Arcana Path-Master — Tactical Design Refactor (Current)
+
+> **최우선 원칙**: READY 이후 또는 시나리오 실행 이후, Legacy 시스템과 절대 연결되지 않는다.
+> 기존 Dijkstra / 자동 경로 / node-link 기반 로직은 실행 경로에 관여하지 않는다.
+
+**설계 철학**: 이 프로젝트의 중심은 **수동 노드 설계(Fate Line)**이며, 자동 경로 계산은 존재하지 않는다.
+코치는 "계산자"가 아니라 **전술 설계자**. Fate Line은 계산 결과가 아니라 **의사 결정의 흔적**이다.
+
+#### 3.1 Legacy Migration (격리 필수)
+- 기존 Dijkstra 기반 pathfinding, node-link 로직을 `Legacy/` 네임스페이스로 이동
+- 컴파일 가능하되, 실행 경로에서 참조 불가
+- Tactical / Flight / Launch / Scenario 어느 단계에서도 import 금지
+- 목적: 향후 AI 라이벌, 자동 추천 기능을 위한 "보관용"
+
+#### 3.2 Fate-Linker (신규 노드 기반 설계 시스템)
+
+**Node Management 규칙**
+- 노드는 수동으로만 추가/삭제
+- 최대 노드 수: 10~20 (상수 제한)
+- 노드는 항상 Index 0 → N 순서 유지
+
+**🔴 인덱스 불변 규칙**
+- 중간 노드 삭제 시 뒤의 모든 노드 index 자동 감소
+- 중간 삽입 / subdivide는 "미래 확장"으로 고려만 (현재 미구현)
+
+**Node Anchor & Gizmo**
+- 각 노드는 `TransformNode`를 anchor로 사용
+- 노드 선택 시 Babylon Position Gizmo 1개만 활성
+- Gizmo 규칙:
+  - 동시에 단 하나만 존재
+  - 선택 해제 / Launch 진입 시 반드시 detach/dispose
+  - Gizmo 드래그 중에는 카메라 입력 완전 차단
+
+#### 3.3 Visual Path (Wind Trail)
+- 노드 0 → N을 잇는 실시간 Spline 경로
+- 설계 단계: 얇고 희미한 흰색 Trail
+- Launch 단계: 고속 "Vector Sync" 연출용 Trail
+- ⚠️ 설계용 / 실행용 Trail은 material 또는 layer 분리
+
+#### 3.4 Dual-Mode Input & Camera System
+
+**Camera Control Panel**
+- 명시적 모드 전환 UI 필수:
+  - Rotate (Orbit)
+  - Pan
+  - Focus (선택 노드로 스냅)
+
+**입력 우선순위**
+- Gizmo Dragging > Camera Input
+- Gizmo 활성 중에는 카메라 이벤트 비활성화
+
+#### 3.5 Flight Mission Logic (MVP 범위)
+- 시작: Node 0
+- 종료 조건: 마지막 Node(N)에 도달하면 Completed
+- 점수 / 목표 / AI / 분기 없음
+- 완료 후: Mission Result 이벤트 → Tactical Design Phase로 복귀
+
+#### 3.6 Seamless Launch Sequence
+
+[START] 버튼 클릭 시:
+1. 모든 노드 편집 및 Gizmo Lock
+2. Wind Trail이 Node 0 → N 방향으로 고속 드로잉
+3. 카메라: Tactical View → Third-Person Chase View
+4. 캐릭터 Fly 애니메이션 시작
+5. Path3D를 따라 이동 시작
+
+⚠️ 이 시점 이후 Legacy 참조 절대 금지
+
+#### 3.7 Loading / Launch 연동 요구사항
+
+**CharacterLoadUnit (필수)**
+- `BaseLoadUnit` 상속
+- 책임: 캐릭터 .glb 모델 로드, 애니메이션 로드 및 등록
+- LoadUnit Constitution 준수
+
+**NavigationScene — ViewSwitcher**
+- 전술 지도(Scene) ↔ 테스트 비행 맵(Scene) 전환 시스템
+- Tactical Design / Flight Phase 간 명확한 Scene 분리
+
+**DebugUI 모듈**
+- 로드된 애니메이션 목록을 버튼 리스트로 표시
+- 버튼 클릭 시 해당 애니메이션 즉시 재생
+- 목적: 캐릭터 상태 검증, 비행 전 애니메이션 확인
+
+**FlightController (초안)**
+- 현재 배치된 노드 데이터 기반 Path3D 생성
+- 캐릭터를 Path3D를 따라 이동
+- 필수 연동: LoadingProtocol, LAUNCH 이벤트
+- 자동 경로 보정 / 탐색 / Dijkstra 절대 사용 금지
+
+#### 3.8 Phase 3 금지 사항 (위반 시 실패)
+- ❌ READY 이후 Legacy 코드 호출
+- ❌ BARRIER / VISUAL_READY에서 자동 경로 판단
+- ❌ Gizmo 다중 attach
+- ❌ activeMeshes count, 간접 지표 사용
+- ❌ "경고만 출력하고 통과"
+
+#### 3.9 핵심 구성요소 (예정 파일)
+| 파일 | 용도 |
+|------|------|
+| `src/engines/navigation/legacy/` | Dijkstra/pathfinding 격리 |
+| `src/engines/navigation/fate/FateLinker.ts` | 수동 노드 설계 시스템 |
+| `src/engines/navigation/fate/FateNode.ts` | 노드 데이터 구조 |
+| `src/engines/navigation/fate/WindTrail.ts` | Visual Path 렌더링 |
+| `src/engines/navigation/flight/FlightController.ts` | Path3D 기반 비행 |
+| `src/engines/navigation/loading/CharacterLoadUnit.ts` | 캐릭터 로드 유닛 |
+| `docs/path-master/ARCHITECTURE.md` | Phase 3 설계 문서 |
+
+---
+
+### Phase 4: Path Planning UI Polish (Future)
 - 목표: '항로 설정' 파트의 시각적 완성도 향상.
 - 구현: 노드 아이콘 디자인, 연결 선의 이펙트(Neon Line), 에너지 소모량 표시 UI.
 - 검증: UI가 3D 월드와 이질감 없이 어우러지는가? (스타레일 스타일)
 
-### Phase 4: Flight Test
+### Phase 5: Flight Test (Future)
 - 목표: 설정된 항로를 따라 비행하는 시퀀스 구현.
 - 구현: 카메라 무빙, 캐릭터 이동, '진심 비행' 연출 테스트.
 - 검증: 끊김 없이 연출이 재생되고 결과창까지 이어지는가?

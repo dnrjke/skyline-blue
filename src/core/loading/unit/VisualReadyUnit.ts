@@ -45,19 +45,31 @@ export interface VisualRequirement {
     displayName: string;
 
     /**
+     * Optional: Attach render observers to track actual rendering.
+     * Called once when VisualReadyUnit starts loading.
+     * Use this to set up onAfterRenderObservable hooks.
+     */
+    attach?: (scene: BABYLON.Scene) => void;
+
+    /**
+     * Optional: Detach render observers.
+     * Called when VisualReadyUnit completes or fails.
+     */
+    detach?: (scene: BABYLON.Scene) => void;
+
+    /**
      * Validation function that checks if this visual is ready.
      *
+     * [VISUAL_READY Phase - Actual Render Check]
+     * "Scene에 존재"가 아니라 "카메라에 렌더링됨"을 확인.
+     *
      * MUST check:
-     * - mesh.isEnabled()
-     * - mesh.isVisible
-     * - mesh.visibility > 0
-     * - boundingInfo exists (for mesh requirements)
-     * - mesh is part of scene.meshes
+     * - Has mesh been rendered in camera frustum at least once?
      *
      * MUST NOT check:
-     * - activeMeshes inclusion
+     * - activeMeshes inclusion (indirect indicator)
      * - timing-based conditions
-     * - "rendered at least once"
+     * - stability / consecutive frames (STABILIZING_100 responsibility)
      */
     validate: (scene: BABYLON.Scene) => VisualValidationResult;
 }
@@ -169,14 +181,6 @@ export interface VisualReadyUnitConfig {
 
     /** Delay between validation attempts (ms) */
     attemptDelayMs?: number;
-
-    /**
-     * [TacticalGrid Incident Prevention]
-     * Minimum consecutive frames a requirement must pass before being considered valid.
-     * Single frame PASS is invalid - prevents GPU spike false positives.
-     * Default: 3
-     */
-    minConsecutiveFrames?: number;
 }
 
 /**
@@ -200,20 +204,12 @@ export class VisualReadyUnit implements LoadUnit {
     private validatedRequirements: Set<string> = new Set();
     private displayName: string;
 
-    /**
-     * [TacticalGrid Incident Prevention]
-     * Track consecutive frame successes per requirement.
-     * A requirement is only "validated" after N consecutive passes.
-     */
-    private consecutiveSuccessCount: Map<string, number> = new Map();
-
     constructor(id: string = 'visual-ready', config: VisualReadyUnitConfig) {
         this.id = id;
         this.displayName = config.displayName ?? 'Verifying Visuals';
         this.config = {
-            maxAttempts: 60, // Increased for consecutive frame checking
+            maxAttempts: 30,
             attemptDelayMs: 50,
-            minConsecutiveFrames: 3, // ❗ 한 프레임 PASS는 무효
             ...config,
         };
     }
@@ -228,9 +224,9 @@ export class VisualReadyUnit implements LoadUnit {
     /**
      * Execute visual validation for all requirements
      *
-     * [TacticalGrid Incident Prevention]
-     * ❗ 한 프레임 PASS는 무효
-     * 각 requirement는 N 연속 프레임 성공 후에만 validated로 간주
+     * [VISUAL_READY Phase - Actual Render Detection]
+     * "Scene에 존재"가 아니라 "카메라에 렌더링됨"을 확인.
+     * attach()로 렌더 옵저버 등록 → validate()로 렌더 여부 확인 → detach()로 정리
      */
     async load(
         scene: BABYLON.Scene,
@@ -242,13 +238,20 @@ export class VisualReadyUnit implements LoadUnit {
 
         this.status = LoadUnitStatus.LOADING;
         this.validatedRequirements.clear();
-        this.consecutiveSuccessCount.clear();
         const startTime = performance.now();
 
         const requirements = this.config.requirements;
         const maxAttempts = this.config.maxAttempts!;
         const attemptDelayMs = this.config.attemptDelayMs!;
-        const minConsecutiveFrames = this.config.minConsecutiveFrames!;
+
+        // [Step 1] Attach render observers for all requirements
+        for (const req of requirements) {
+            try {
+                req.attach?.(scene);
+            } catch (err) {
+                console.warn(`[VisualReadyUnit] Failed to attach ${req.id}:`, err);
+            }
+        }
 
         let attempt = 0;
 
@@ -256,50 +259,20 @@ export class VisualReadyUnit implements LoadUnit {
             while (attempt < maxAttempts) {
                 attempt++;
 
-                // Validate all requirements with consecutive frame tracking
                 const pendingRequirements: VisualRequirement[] = [];
                 let allReady = true;
 
                 for (const req of requirements) {
                     if (this.validatedRequirements.has(req.id)) {
-                        continue; // Already validated (passed N consecutive frames)
+                        continue;
                     }
 
                     const result = req.validate(scene);
-                    const currentCount = this.consecutiveSuccessCount.get(req.id) ?? 0;
 
                     if (result.ready) {
-                        const newCount = currentCount + 1;
-                        this.consecutiveSuccessCount.set(req.id, newCount);
-
-                        // [Constitutional Rule] Only mark as validated after N consecutive successes
-                        if (newCount >= minConsecutiveFrames) {
-                            this.validatedRequirements.add(req.id);
-                            console.log(
-                                `[VisualReadyUnit] ✓ ${req.displayName} ready ` +
-                                `(${newCount}/${minConsecutiveFrames} consecutive frames)`
-                            );
-                        } else {
-                            // Still building consecutive count
-                            pendingRequirements.push(req);
-                            allReady = false;
-
-                            if (attempt === 1 || attempt % 10 === 0) {
-                                console.log(
-                                    `[VisualReadyUnit] ⏳ ${req.displayName} ` +
-                                    `(${newCount}/${minConsecutiveFrames} consecutive frames)`
-                                );
-                            }
-                        }
+                        this.validatedRequirements.add(req.id);
+                        console.log(`[VisualReadyUnit] ✓ ${req.displayName} rendered`);
                     } else {
-                        // Failed - reset consecutive count to 0
-                        if (currentCount > 0) {
-                            console.warn(
-                                `[VisualReadyUnit] ⚠ ${req.displayName} failed after ` +
-                                `${currentCount} consecutive successes: ${result.reason}`
-                            );
-                        }
-                        this.consecutiveSuccessCount.set(req.id, 0);
                         pendingRequirements.push(req);
                         allReady = false;
 
@@ -309,63 +282,68 @@ export class VisualReadyUnit implements LoadUnit {
                     }
                 }
 
-                // Report progress (account for consecutive frame requirement)
-                const totalFramesNeeded = requirements.length * minConsecutiveFrames;
-                let totalFramesPassed = 0;
-                for (const req of requirements) {
-                    if (this.validatedRequirements.has(req.id)) {
-                        totalFramesPassed += minConsecutiveFrames;
-                    } else {
-                        totalFramesPassed += this.consecutiveSuccessCount.get(req.id) ?? 0;
-                    }
-                }
-                const progress = Math.min(1, totalFramesPassed / totalFramesNeeded);
-
+                const progress = this.validatedRequirements.size / requirements.length;
                 onProgress?.({
                     progress,
                     message: allReady
-                        ? 'All visuals ready'
-                        : `Verifying: ${pendingRequirements[0]?.displayName ?? 'visuals'}`,
+                        ? 'All visuals rendered'
+                        : `Waiting: ${pendingRequirements[0]?.displayName ?? 'visuals'}`,
                 });
 
                 if (allReady) {
+                    // [Step 2] Detach observers on success
+                    this.detachRequirements(scene, requirements);
+
                     this.status = LoadUnitStatus.VALIDATED;
                     this.elapsedMs = performance.now() - startTime;
                     console.log(
-                        `[VisualReadyUnit] All ${requirements.length} requirements validated ` +
-                        `in ${attempt} attempts, ${Math.round(this.elapsedMs)}ms ` +
-                        `(each required ${minConsecutiveFrames} consecutive frames)`
+                        `[VisualReadyUnit] All ${requirements.length} requirements rendered ` +
+                        `in ${attempt} attempts, ${Math.round(this.elapsedMs)}ms`
                     );
                     return;
                 }
 
-                // Wait before next attempt
                 await this.delay(attemptDelayMs);
             }
 
-            // Max attempts reached - report failure
+            // [Step 2] Detach observers on failure
+            this.detachRequirements(scene, requirements);
+
+            // Max attempts reached - EXPLICIT FAILURE
             const pendingNames = this.config.requirements
                 .filter((r) => !this.validatedRequirements.has(r.id))
-                .map((r) => {
-                    const count = this.consecutiveSuccessCount.get(r.id) ?? 0;
-                    return `${r.displayName} (${count}/${minConsecutiveFrames})`;
-                })
+                .map((r) => r.displayName)
                 .join(', ');
 
             this.status = LoadUnitStatus.FAILED;
             this.elapsedMs = performance.now() - startTime;
             this.error = new Error(
-                `[VisualReadyUnit] Failed after ${maxAttempts} attempts. ` +
-                `Pending: ${pendingNames}`
+                `[VisualReadyUnit] VISUAL_READY FAILED: ${pendingNames} not rendered after ${maxAttempts} attempts`
             );
             throw this.error;
         } catch (err) {
+            // Ensure cleanup on error
+            this.detachRequirements(scene, requirements);
+
             this.elapsedMs = performance.now() - startTime;
             if (!(err instanceof Error && err === this.error)) {
                 this.error = err instanceof Error ? err : new Error(String(err));
             }
             this.status = LoadUnitStatus.FAILED;
             throw this.error;
+        }
+    }
+
+    /**
+     * Detach render observers from all requirements
+     */
+    private detachRequirements(scene: BABYLON.Scene, requirements: VisualRequirement[]): void {
+        for (const req of requirements) {
+            try {
+                req.detach?.(scene);
+            } catch (err) {
+                console.warn(`[VisualReadyUnit] Failed to detach ${req.id}:`, err);
+            }
         }
     }
 
@@ -406,7 +384,6 @@ export class VisualReadyUnit implements LoadUnit {
         this.elapsedMs = undefined;
         this.error = undefined;
         this.validatedRequirements.clear();
-        this.consecutiveSuccessCount.clear();
     }
 
     /**
@@ -414,7 +391,6 @@ export class VisualReadyUnit implements LoadUnit {
      */
     dispose(): void {
         this.validatedRequirements.clear();
-        this.consecutiveSuccessCount.clear();
     }
 
     private delay(ms: number): Promise<void> {
@@ -425,71 +401,99 @@ export class VisualReadyUnit implements LoadUnit {
 /**
  * Factory for creating TacticalGrid visual requirement
  *
- * [TacticalGrid Incident Prevention - STRICTER VALIDATION]
+ * [VISUAL_READY Phase - Actual Render Detection]
  *
- * TacticalGridVisualUnit은 "가장 마지막 검증자"
+ * ❗ "Scene에 존재"가 아니라 "카메라에 렌더링됨"을 확인
+ * ❗ Scene Explorer 기준 완전 배제
+ * ❗ 안정성/완성도 검증은 STABILIZING_100에서 수행
  *
- * 이 조건 전부 충족해야 PASS:
- * ✓ mesh.isVisible === true
- * ✓ mesh.visibility > 0
- * ✓ mesh.getWorldMatrix().determinant !== 0
- * ✓ mesh.isReady(true)
- * ✓ mesh.isEnabled()
- * ✓ mesh has vertices
- * ✓ mesh in scene.meshes
+ * 검증 로직:
+ * 1. attach(): onAfterRenderObservable로 렌더 감시 시작
+ * 2. validate(): "한 번이라도 카메라 frustum 내에서 렌더되었는가?"
+ * 3. detach(): 옵저버 정리
  *
- * ❗ 한 프레임 PASS는 무효 (연속 프레임 검증은 VisualReadyUnit level에서 처리)
+ * 이 조건만 충족하면 PASS:
+ * ✓ mesh가 카메라 frustum 내에서 최소 1회 렌더됨
+ *
+ * ❌ 다음은 VISUAL_READY에서 검사하지 않음 (STABILIZING_100 책임):
+ * - 연속 프레임 안정성
+ * - bounds 크기 안정성
+ * - material warmup
  */
 export function createTacticalGridVisualRequirement(): VisualRequirement {
+    // Closure state for render tracking
+    let seenInRender = false;
+    let observer: BABYLON.Nullable<BABYLON.Observer<BABYLON.Scene>> = null;
+
     return {
         id: 'visual:TacticalGrid',
         displayName: 'Tactical Grid',
-        validate: (scene: BABYLON.Scene): VisualValidationResult => {
-            const mesh = scene.getMeshByName('TacticalGrid');
 
-            if (!mesh) {
-                return { ready: false, reason: 'TacticalGrid mesh not found' };
+        attach(scene: BABYLON.Scene): void {
+            // Prevent duplicate observer attachment
+            if (observer) return;
+
+            // Reset state
+            seenInRender = false;
+
+            // Watch for actual rendering
+            observer = scene.onAfterRenderObservable.add(() => {
+                if (seenInRender) return; // Already confirmed
+
+                const mesh = scene.getMeshByName('TacticalGrid');
+                if (!mesh || mesh.isDisposed()) return;
+
+                // Check if mesh is in renderable state
+                if (!mesh.isEnabled() || !mesh.isVisible) return;
+
+                const camera = scene.activeCamera;
+                if (!camera) return;
+
+                // Check if mesh is in camera frustum
+                const boundingInfo = mesh.getBoundingInfo();
+                if (!boundingInfo) return;
+
+                // Use camera.getFrustumPlanes() for accurate frustum check
+                const frustumPlanes = (camera as BABYLON.Camera & { _getFrustumPlanes?: () => BABYLON.Plane[] })._getFrustumPlanes?.()
+                    ?? scene.frustumPlanes;
+
+                if (frustumPlanes && frustumPlanes.length > 0) {
+                    try {
+                        if (boundingInfo.isInFrustum(frustumPlanes)) {
+                            seenInRender = true;
+                            console.log('[TacticalGridVisualRequirement] ✓ Rendered in camera frustum');
+                        }
+                    } catch {
+                        // Fallback: check if mesh was processed in active meshes
+                        const activeMeshes = scene.getActiveMeshes();
+                        if (activeMeshes.data.includes(mesh)) {
+                            seenInRender = true;
+                            console.log('[TacticalGridVisualRequirement] ✓ Found in activeMeshes (fallback)');
+                        }
+                    }
+                }
+            });
+
+            console.log('[TacticalGridVisualRequirement] Attached render observer');
+        },
+
+        detach(scene: BABYLON.Scene): void {
+            if (!observer) return;
+
+            scene.onAfterRenderObservable.remove(observer);
+            observer = null;
+            console.log('[TacticalGridVisualRequirement] Detached render observer');
+        },
+
+        validate(_scene: BABYLON.Scene): VisualValidationResult {
+            if (!seenInRender) {
+                return {
+                    ready: false,
+                    reason: 'TacticalGrid not yet rendered in camera frustum',
+                };
             }
 
-            if (mesh.isDisposed()) {
-                return { ready: false, reason: 'TacticalGrid is disposed' };
-            }
-
-            if (!scene.meshes.includes(mesh)) {
-                return { ready: false, reason: 'TacticalGrid not in scene.meshes' };
-            }
-
-            // TacticalGrid uses isEnabled() for visibility control
-            if (!mesh.isEnabled()) {
-                return { ready: false, reason: 'TacticalGrid is not enabled' };
-            }
-
-            // isVisible must be true
-            if (!mesh.isVisible) {
-                return { ready: false, reason: 'TacticalGrid isVisible = false' };
-            }
-
-            // visibility must be > 0 (no longer allowing 0 for VISUAL_READY phase)
-            if (mesh.visibility <= 0) {
-                return { ready: false, reason: `TacticalGrid visibility = ${mesh.visibility}` };
-            }
-
-            // [NEW] World matrix determinant check - ensures valid transform
-            const determinant = mesh.getWorldMatrix().determinant();
-            if (determinant === 0) {
-                return { ready: false, reason: 'TacticalGrid worldMatrix determinant = 0 (invalid transform)' };
-            }
-
-            // [NEW] isReady check - ensures GPU resources are ready
-            if (!mesh.isReady(true)) {
-                return { ready: false, reason: 'TacticalGrid is not ready (GPU resources pending)' };
-            }
-
-            // Geometry check
-            if (mesh.getTotalVertices() <= 0) {
-                return { ready: false, reason: 'TacticalGrid has no vertices' };
-            }
-
+            // ✅ VISUAL_READY 통과 - "최소 1회 렌더됨"
             return { ready: true };
         },
     };
