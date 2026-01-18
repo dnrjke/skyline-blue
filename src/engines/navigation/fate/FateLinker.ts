@@ -315,13 +315,91 @@ export class FateLinker {
     }
 
     /**
-     * Find node by picked mesh
+     * Find node by picked mesh (checks hitProxy)
      */
     findNodeByMesh(mesh: BABYLON.AbstractMesh | null): FateNode | null {
         if (!mesh) return null;
         const metadata = mesh.metadata as { fateNodeIndex?: number } | undefined;
         if (metadata?.fateNodeIndex === undefined) return null;
         return this.getNode(metadata.fateNodeIndex);
+    }
+
+    /**
+     * Insert node at specific index (for undo/redo system)
+     * Shifts subsequent nodes up
+     */
+    insertNodeAt(position: BABYLON.Vector3, targetIndex: number): FateNode | null {
+        if (this.disposed) return null;
+        if (this.nodes.length >= this.MAX_NODES) return null;
+
+        // Clamp index to valid range
+        const insertIndex = Math.max(0, Math.min(targetIndex, this.nodes.length));
+
+        // Create node
+        const node = new FateNode(
+            this.utilityScene,
+            insertIndex,
+            position,
+            this.normalMaterial,
+            this.selectedMaterial
+        );
+
+        // Insert at position
+        this.nodes.splice(insertIndex, 0, node);
+
+        // Re-index subsequent nodes
+        for (let i = insertIndex + 1; i < this.nodes.length; i++) {
+            this.nodes[i].setIndex(i);
+        }
+
+        this.notifyNodesChanged();
+        console.log(`[FateLinker] Inserted node at index ${insertIndex}`);
+        return node;
+    }
+
+    /**
+     * Remove node and return snapshot (for undo system)
+     */
+    removeNodeWithSnapshot(index: number): { index: number; position: BABYLON.Vector3 } | null {
+        if (this.disposed) return null;
+        if (index < 0 || index >= this.nodes.length) return null;
+
+        const node = this.nodes[index];
+        const snapshot = {
+            index: node.index,
+            position: node.position.clone(),
+        };
+
+        node.dispose();
+        this.nodes.splice(index, 1);
+
+        // Re-index subsequent nodes
+        for (let i = index; i < this.nodes.length; i++) {
+            this.nodes[i].setIndex(i);
+        }
+
+        // Adjust selection if needed
+        if (this.selectedIndex === index) {
+            this.selectedIndex = -1;
+            this.notifySelectionChanged();
+        } else if (this.selectedIndex > index) {
+            this.selectedIndex--;
+            this.notifySelectionChanged();
+        }
+
+        this.notifyNodesChanged();
+        console.log(`[FateLinker] Removed node ${index} with snapshot`);
+        return snapshot;
+    }
+
+    /**
+     * Enable/disable hit proxy picking for all nodes
+     * Used to control selection availability per input mode
+     */
+    setAllNodesPickable(pickable: boolean): void {
+        for (const node of this.nodes) {
+            node.setPickable(pickable);
+        }
     }
 
     /**
