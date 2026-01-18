@@ -121,9 +121,10 @@ export class NavigationScene {
         // Create HUD
         this.hud = new TacticalHUD(systemLayer, {
             onClear: () => this.clearPath(),
-            onUndo: () => this.undoLastNode(),
+            onUndo: () => this.handleUndo(),
+            onRedo: () => this.handleRedo(),
             onConfirm: () => this.confirmAndLaunch(),
-            onModeToggle: () => this.toggleInputMode(),
+            onSetMode: (mode) => this.setInputMode(mode),
         });
     }
 
@@ -474,11 +475,19 @@ export class NavigationScene {
     }
 
     /**
-     * Undo last node
+     * Handle undo via action stack
      */
-    private undoLastNode(): void {
+    private handleUndo(): void {
         if (this.isFlying) return;
-        this.tacticalDesign.removeLastNode();
+        this.tacticalDesign.undo();
+    }
+
+    /**
+     * Handle redo via action stack
+     */
+    private handleRedo(): void {
+        if (this.isFlying) return;
+        this.tacticalDesign.redo();
     }
 
     /**
@@ -609,14 +618,27 @@ export class NavigationScene {
 
 /**
  * TacticalHUD - Phase 3 UI for tactical design
+ *
+ * Touch-friendly design:
+ * - Large mode buttons (48px height, 100px width)
+ * - Clear visual separation between modes
+ * - Undo/Redo with stack depth display
  */
 class TacticalHUD {
     private container: GUI.Rectangle;
     private nodeCountText: GUI.TextBlock;
     private statusText: GUI.TextBlock;
-    private modeButton: GUI.Button;
+    private debugText: GUI.TextBlock;
+
+    // Mode buttons (3 separate for clarity)
+    private cameraModeBtn: GUI.Button;
+    private placeModeBtn: GUI.Button;
+    private editModeBtn: GUI.Button;
+
+    // Action buttons
     private clearButton: GUI.Button;
     private undoButton: GUI.Button;
+    private redoButton: GUI.Button;
     private confirmButton: GUI.Button;
 
     constructor(
@@ -624,93 +646,132 @@ class TacticalHUD {
         callbacks: {
             onClear: () => void;
             onUndo: () => void;
+            onRedo: () => void;
             onConfirm: () => void;
-            onModeToggle: () => void;
+            onSetMode: (mode: TacticalInputMode) => void;
         }
     ) {
-        // Container
+        // Main container
         this.container = new GUI.Rectangle('TacticalHUD');
-        this.container.width = '300px';
-        this.container.height = '150px';
+        this.container.width = '340px';
+        this.container.height = '220px';
         this.container.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
         this.container.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
         this.container.top = '20px';
         this.container.left = '-20px';
-        this.container.background = 'rgba(0, 0, 0, 0.7)';
-        this.container.cornerRadius = 10;
-        this.container.thickness = 1;
-        this.container.color = 'rgba(100, 150, 255, 0.5)';
+        this.container.background = 'rgba(0, 0, 0, 0.8)';
+        this.container.cornerRadius = 12;
+        this.container.thickness = 2;
+        this.container.color = 'rgba(100, 150, 255, 0.6)';
         this.container.isVisible = false;
         parent.addControl(this.container);
 
-        // Node count
+        // === MODE BUTTONS (Top row) ===
+        const modePanel = new GUI.StackPanel('modePanel');
+        modePanel.isVertical = false;
+        modePanel.height = '52px';
+        modePanel.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        modePanel.top = '8px';
+        modePanel.spacing = 6;
+        this.container.addControl(modePanel);
+
+        // Camera mode button
+        this.cameraModeBtn = this.createModeButton('CAM', 'rgba(120, 80, 200, 0.9)');
+        this.cameraModeBtn.onPointerClickObservable.add(() => callbacks.onSetMode('camera'));
+        modePanel.addControl(this.cameraModeBtn);
+
+        // Place mode button
+        this.placeModeBtn = this.createModeButton('NODE', 'rgba(80, 180, 80, 0.9)');
+        this.placeModeBtn.onPointerClickObservable.add(() => callbacks.onSetMode('place'));
+        modePanel.addControl(this.placeModeBtn);
+
+        // Edit mode button
+        this.editModeBtn = this.createModeButton('EDIT', 'rgba(200, 150, 50, 0.9)');
+        this.editModeBtn.onPointerClickObservable.add(() => callbacks.onSetMode('edit'));
+        modePanel.addControl(this.editModeBtn);
+
+        // === STATUS AREA ===
         this.nodeCountText = new GUI.TextBlock('nodeCount', 'Nodes: 0 / 15');
-        this.nodeCountText.height = '30px';
-        this.nodeCountText.top = '-40px';
+        this.nodeCountText.height = '24px';
+        this.nodeCountText.top = '65px';
         this.nodeCountText.color = 'white';
-        this.nodeCountText.fontSize = 16;
+        this.nodeCountText.fontSize = 14;
+        this.nodeCountText.fontWeight = 'bold';
+        this.nodeCountText.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
         this.container.addControl(this.nodeCountText);
 
-        // Status
         this.statusText = new GUI.TextBlock('status', 'Tap to add nodes');
-        this.statusText.height = '25px';
-        this.statusText.top = '-10px';
+        this.statusText.height = '22px';
+        this.statusText.top = '88px';
         this.statusText.color = 'rgba(150, 200, 255, 0.9)';
         this.statusText.fontSize = 12;
+        this.statusText.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
         this.container.addControl(this.statusText);
 
-        // Mode button (separate from main buttons, positioned at top-left of container)
-        this.modeButton = GUI.Button.CreateSimpleButton('mode', 'Design');
-        this.modeButton.width = '80px';
-        this.modeButton.height = '28px';
-        this.modeButton.color = 'white';
-        this.modeButton.background = 'rgba(80, 120, 200, 0.9)';
-        this.modeButton.cornerRadius = 5;
-        this.modeButton.fontSize = 12;
-        this.modeButton.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
-        this.modeButton.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
-        this.modeButton.top = '-55px';
-        this.modeButton.left = '10px';
-        this.modeButton.onPointerClickObservable.add(() => callbacks.onModeToggle());
-        this.container.addControl(this.modeButton);
+        // Debug text (undo/redo stack depth)
+        this.debugText = new GUI.TextBlock('debug', 'Undo: 0 | Redo: 0');
+        this.debugText.height = '18px';
+        this.debugText.top = '108px';
+        this.debugText.color = 'rgba(150, 150, 150, 0.7)';
+        this.debugText.fontSize = 10;
+        this.debugText.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        this.container.addControl(this.debugText);
 
-        // Button container
-        const buttonPanel = new GUI.StackPanel('buttons');
-        buttonPanel.isVertical = false;
-        buttonPanel.height = '40px';
-        buttonPanel.top = '40px';
-        buttonPanel.spacing = 10;
-        this.container.addControl(buttonPanel);
+        // === UNDO/REDO BUTTONS ===
+        const undoRedoPanel = new GUI.StackPanel('undoRedoPanel');
+        undoRedoPanel.isVertical = false;
+        undoRedoPanel.height = '44px';
+        undoRedoPanel.top = '128px';
+        undoRedoPanel.spacing = 8;
+        undoRedoPanel.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        this.container.addControl(undoRedoPanel);
 
-        // Clear button
-        this.clearButton = GUI.Button.CreateSimpleButton('clear', 'Clear');
-        this.clearButton.width = '70px';
-        this.clearButton.height = '35px';
-        this.clearButton.color = 'white';
-        this.clearButton.background = 'rgba(200, 50, 50, 0.8)';
-        this.clearButton.cornerRadius = 5;
-        this.clearButton.onPointerClickObservable.add(() => callbacks.onClear());
-        buttonPanel.addControl(this.clearButton);
-
-        // Undo button
-        this.undoButton = GUI.Button.CreateSimpleButton('undo', 'Undo');
-        this.undoButton.width = '70px';
-        this.undoButton.height = '35px';
-        this.undoButton.color = 'white';
-        this.undoButton.background = 'rgba(100, 100, 100, 0.8)';
-        this.undoButton.cornerRadius = 5;
+        this.undoButton = this.createActionButton('UNDO', 'rgba(100, 100, 150, 0.9)', 80);
         this.undoButton.onPointerClickObservable.add(() => callbacks.onUndo());
-        buttonPanel.addControl(this.undoButton);
+        undoRedoPanel.addControl(this.undoButton);
 
-        // Confirm/Launch button
-        this.confirmButton = GUI.Button.CreateSimpleButton('confirm', 'START');
-        this.confirmButton.width = '90px';
-        this.confirmButton.height = '35px';
-        this.confirmButton.color = 'white';
-        this.confirmButton.background = 'rgba(50, 150, 50, 0.8)';
-        this.confirmButton.cornerRadius = 5;
+        this.redoButton = this.createActionButton('REDO', 'rgba(100, 100, 150, 0.9)', 80);
+        this.redoButton.onPointerClickObservable.add(() => callbacks.onRedo());
+        undoRedoPanel.addControl(this.redoButton);
+
+        this.clearButton = this.createActionButton('CLEAR', 'rgba(180, 60, 60, 0.9)', 80);
+        this.clearButton.onPointerClickObservable.add(() => callbacks.onClear());
+        undoRedoPanel.addControl(this.clearButton);
+
+        // === LAUNCH BUTTON ===
+        this.confirmButton = this.createActionButton('START', 'rgba(50, 150, 50, 0.9)', 140);
+        this.confirmButton.height = '48px';
+        this.confirmButton.fontSize = 16;
+        this.confirmButton.fontWeight = 'bold';
+        this.confirmButton.top = '175px';
+        this.confirmButton.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
         this.confirmButton.onPointerClickObservable.add(() => callbacks.onConfirm());
-        buttonPanel.addControl(this.confirmButton);
+        this.container.addControl(this.confirmButton);
+    }
+
+    private createModeButton(text: string, bgColor: string): GUI.Button {
+        const btn = GUI.Button.CreateSimpleButton(`mode_${text}`, text);
+        btn.width = '100px';
+        btn.height = '48px';
+        btn.color = 'white';
+        btn.background = bgColor;
+        btn.cornerRadius = 8;
+        btn.fontSize = 14;
+        btn.fontWeight = 'bold';
+        btn.thickness = 2;
+        return btn;
+    }
+
+    private createActionButton(text: string, bgColor: string, width: number): GUI.Button {
+        const btn = GUI.Button.CreateSimpleButton(`action_${text}`, text);
+        btn.width = `${width}px`;
+        btn.height = '40px';
+        btn.color = 'white';
+        btn.background = bgColor;
+        btn.cornerRadius = 6;
+        btn.fontSize = 12;
+        btn.fontWeight = 'bold';
+        return btn;
     }
 
     show(): void {
@@ -723,35 +784,10 @@ class TacticalHUD {
 
     updateState(state: TacticalDesignState): void {
         this.nodeCountText.text = `Nodes: ${state.nodeCount} / ${state.maxNodes}`;
+        this.debugText.text = `Undo: ${state.undoDepth} | Redo: ${state.redoDepth}`;
 
-        // Update mode button with 3-state display
-        const modeTextBlock = this.modeButton.textBlock;
-        if (modeTextBlock) {
-            switch (state.inputMode) {
-                case 'camera':
-                    modeTextBlock.text = 'Camera';
-                    break;
-                case 'place':
-                    modeTextBlock.text = 'Place';
-                    break;
-                case 'edit':
-                    modeTextBlock.text = 'Edit';
-                    break;
-            }
-        }
-
-        // Mode-specific colors
-        switch (state.inputMode) {
-            case 'camera':
-                this.modeButton.background = 'rgba(120, 80, 200, 0.9)';  // Purple
-                break;
-            case 'place':
-                this.modeButton.background = 'rgba(80, 180, 80, 0.9)';   // Green
-                break;
-            case 'edit':
-                this.modeButton.background = 'rgba(200, 150, 50, 0.9)';  // Gold
-                break;
-        }
+        // Update mode button highlighting
+        this.updateModeButtonStyles(state.inputMode, state.isLocked);
 
         // Update status text based on mode
         if (state.isLocked) {
@@ -763,7 +799,7 @@ class TacticalHUD {
         } else {
             switch (state.inputMode) {
                 case 'camera':
-                    this.statusText.text = 'Camera mode (drag to rotate)';
+                    this.statusText.text = 'Camera mode (drag to rotate/pan)';
                     this.statusText.color = 'rgba(200, 150, 255, 0.9)';
                     break;
                 case 'place':
@@ -774,24 +810,60 @@ class TacticalHUD {
                     break;
                 case 'edit':
                     this.statusText.text = state.selectedIndex >= 0
-                        ? `Editing node ${state.selectedIndex}`
-                        : 'Tap a node to edit';
+                        ? `Editing node ${state.selectedIndex} (drag gizmo)`
+                        : 'Tap a node to select';
                     this.statusText.color = 'rgba(255, 220, 100, 0.9)';
                     break;
             }
         }
 
-        // Update button states
+        // Update action button states
         this.clearButton.isEnabled = state.nodeCount > 0 && !state.isLocked;
-        this.undoButton.isEnabled = state.nodeCount > 0 && !state.isLocked;
+        this.undoButton.isEnabled = state.canUndo;
+        this.redoButton.isEnabled = state.canRedo;
         this.confirmButton.isEnabled = state.canLaunch;
-        this.modeButton.isEnabled = !state.isLocked;
 
         // Visual feedback for disabled buttons
-        this.clearButton.alpha = this.clearButton.isEnabled ? 1 : 0.5;
-        this.undoButton.alpha = this.undoButton.isEnabled ? 1 : 0.5;
-        this.confirmButton.alpha = this.confirmButton.isEnabled ? 1 : 0.5;
-        this.modeButton.alpha = this.modeButton.isEnabled ? 1 : 0.5;
+        this.clearButton.alpha = this.clearButton.isEnabled ? 1 : 0.4;
+        this.undoButton.alpha = this.undoButton.isEnabled ? 1 : 0.4;
+        this.redoButton.alpha = this.redoButton.isEnabled ? 1 : 0.4;
+        this.confirmButton.alpha = this.confirmButton.isEnabled ? 1 : 0.4;
+    }
+
+    private updateModeButtonStyles(activeMode: TacticalInputMode, isLocked: boolean): void {
+        const activeColor = {
+            camera: 'rgba(120, 80, 200, 1.0)',
+            place: 'rgba(80, 180, 80, 1.0)',
+            edit: 'rgba(200, 150, 50, 1.0)',
+        };
+        const inactiveColor = {
+            camera: 'rgba(60, 40, 100, 0.6)',
+            place: 'rgba(40, 90, 40, 0.6)',
+            edit: 'rgba(100, 75, 25, 0.6)',
+        };
+
+        // Camera button
+        this.cameraModeBtn.background = activeMode === 'camera' ? activeColor.camera : inactiveColor.camera;
+        this.cameraModeBtn.color = activeMode === 'camera' ? 'white' : 'rgba(200, 200, 200, 0.8)';
+        this.cameraModeBtn.thickness = activeMode === 'camera' ? 3 : 1;
+
+        // Place button
+        this.placeModeBtn.background = activeMode === 'place' ? activeColor.place : inactiveColor.place;
+        this.placeModeBtn.color = activeMode === 'place' ? 'white' : 'rgba(200, 200, 200, 0.8)';
+        this.placeModeBtn.thickness = activeMode === 'place' ? 3 : 1;
+
+        // Edit button
+        this.editModeBtn.background = activeMode === 'edit' ? activeColor.edit : inactiveColor.edit;
+        this.editModeBtn.color = activeMode === 'edit' ? 'white' : 'rgba(200, 200, 200, 0.8)';
+        this.editModeBtn.thickness = activeMode === 'edit' ? 3 : 1;
+
+        // Disable all if locked
+        this.cameraModeBtn.isEnabled = !isLocked;
+        this.placeModeBtn.isEnabled = !isLocked;
+        this.editModeBtn.isEnabled = !isLocked;
+        this.cameraModeBtn.alpha = isLocked ? 0.5 : 1;
+        this.placeModeBtn.alpha = isLocked ? 0.5 : 1;
+        this.editModeBtn.alpha = isLocked ? 0.5 : 1;
     }
 
     dispose(): void {

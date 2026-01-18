@@ -17,6 +17,13 @@ import { FateLinker } from '../fate/FateLinker';
 import { GizmoController } from '../fate/GizmoController';
 import { WindTrail } from '../fate/WindTrail';
 import type { FateNode } from '../fate/FateNode';
+import {
+    EditorActionStack,
+    CreateNodeAction,
+    DeleteNodeAction,
+    MoveNodeAction,
+    type NodeActionCallbacks,
+} from './EditorActionStack';
 
 /**
  * Input modes for TacticalDesignController
@@ -52,6 +59,14 @@ export interface TacticalDesignState {
     canLaunch: boolean;
     /** Current input mode */
     inputMode: TacticalInputMode;
+    /** Undo stack depth */
+    undoDepth: number;
+    /** Redo stack depth */
+    redoDepth: number;
+    /** Can undo */
+    canUndo: boolean;
+    /** Can redo */
+    canRedo: boolean;
 }
 
 export interface TacticalDesignCallbacks {
@@ -81,6 +96,7 @@ export class TacticalDesignController {
     private fateLinker: FateLinker;
     private gizmoController: GizmoController;
     private windTrail: WindTrail;
+    private actionStack: EditorActionStack;
 
     // State
     private isLocked: boolean = false;
@@ -93,11 +109,18 @@ export class TacticalDesignController {
     private readonly TAP_THRESHOLD_MS = 300;
     private readonly TAP_MOVE_THRESHOLD = 10; // pixels
 
+    // Gizmo drag tracking (for move action recording)
+    private gizmoDragStartPosition: BABYLON.Vector3 | null = null;
+    private gizmoDragNodeIndex: number = -1;
+
     // Callbacks
     private callbacks: TacticalDesignCallbacks = {};
 
     // Camera reference (for gizmo input blocking)
     private camera: BABYLON.ArcRotateCamera | null = null;
+
+    // Node action callbacks for EditorActionStack
+    private nodeActionCallbacks: NodeActionCallbacks;
 
     constructor(scene: BABYLON.Scene, config: TacticalDesignConfig = {}) {
         this.scene = scene;
@@ -113,6 +136,34 @@ export class TacticalDesignController {
 
         this.gizmoController = new GizmoController(scene);
         this.windTrail = new WindTrail(scene);
+
+        // Initialize Undo/Redo action stack
+        this.actionStack = new EditorActionStack();
+        this.actionStack.setCallbacks({
+            onStateChange: () => this.notifyStateChange(),
+        });
+
+        // Setup node action callbacks for EditorActionStack
+        this.nodeActionCallbacks = {
+            createNode: (position, atIndex) => {
+                if (atIndex !== undefined) {
+                    this.fateLinker.insertNodeAt(position, atIndex);
+                } else {
+                    this.fateLinker.addNode(position);
+                }
+            },
+            deleteNode: (index) => {
+                const snapshot = this.fateLinker.removeNodeWithSnapshot(index);
+                return snapshot ?? { index: -1, position: BABYLON.Vector3.Zero() };
+            },
+            moveNode: (index, position) => {
+                this.fateLinker.moveNode(index, position);
+            },
+            getNodePosition: (index) => {
+                const node = this.fateLinker.getNode(index);
+                return node ? node.position.clone() : null;
+            },
+        };
 
         // Wire up internal callbacks
         this.setupInternalCallbacks();
@@ -141,17 +192,47 @@ export class TacticalDesignController {
             },
         });
 
-        // Gizmo -> FateLinker sync
+        // Gizmo -> FateLinker sync + Action recording
         this.gizmoController.setCallbacks({
             onDragStart: () => {
-                // Block camera during drag
+                // Record start position for move action
+                const node = this.gizmoController.getAttachedNode();
+                if (node) {
+                    this.gizmoDragStartPosition = node.position.clone();
+                    this.gizmoDragNodeIndex = node.index;
+                    console.log(`[TacticalDesign] Gizmo drag start: node ${node.index}`);
+                }
             },
             onDragEnd: () => {
                 // Sync node position after drag
                 const node = this.gizmoController.getAttachedNode();
                 if (node) {
                     this.fateLinker.syncNodeFromAnchor(node.index);
+
+                    // Record move action (only if position actually changed)
+                    if (this.gizmoDragStartPosition && this.gizmoDragNodeIndex >= 0) {
+                        const endPos = node.position;
+                        const moved = !this.gizmoDragStartPosition.equals(endPos);
+
+                        if (moved) {
+                            const moveAction = new MoveNodeAction(
+                                this.gizmoDragNodeIndex,
+                                this.gizmoDragStartPosition,
+                                endPos.clone(),
+                                this.nodeActionCallbacks
+                            );
+                            // Don't execute - just record (position already changed)
+                            this.actionStack['undoStack'].push(moveAction);
+                            this.actionStack['redoStack'] = [];
+                            console.log(`[TacticalDesign] Recorded move action: node ${node.index}`);
+                            this.notifyStateChange();
+                        }
+                    }
                 }
+
+                // Reset drag tracking
+                this.gizmoDragStartPosition = null;
+                this.gizmoDragNodeIndex = -1;
             },
             onPositionChange: (_node, _position) => {
                 // Real-time path update during drag
@@ -168,20 +249,29 @@ export class TacticalDesignController {
     }
 
     /**
-     * Set camera for gizmo input blocking
+     * Set camera for gizmo input blocking and mode-based control
      */
     setCamera(camera: BABYLON.ArcRotateCamera): void {
         this.camera = camera;
         this.gizmoController.setCamera(camera);
+
+        // Initialize camera controls based on current mode
+        this.updateCameraControls(this.inputMode);
     }
 
     /**
-     * Add a node at world position
+     * Add a node at world position (via action stack for undo support)
      */
     addNodeAtPosition(position: BABYLON.Vector3): FateNode | null {
         if (this.isLocked || this.disposed) return null;
 
-        const node = this.fateLinker.addNode(position);
+        // Create and execute action (records for undo)
+        const action = new CreateNodeAction(position, this.nodeActionCallbacks);
+        action.setCreatedIndex(this.fateLinker.getNodeCount()); // Will be this index
+        this.actionStack.execute(action);
+
+        // Get the created node
+        const node = this.fateLinker.getNode(this.fateLinker.getNodeCount() - 1);
         if (node) {
             this.callbacks.onNodeAdded?.(node);
         }
@@ -279,17 +369,64 @@ export class TacticalDesignController {
 
         // EDIT mode: only select existing nodes
         if (this.inputMode === 'edit') {
-            const utilityScene = this.fateLinker.getUtilityScene();
-            const pickResult = utilityScene.pick(pointerX, pointerY, (mesh) => {
-                return mesh.metadata?.fateNodeIndex !== undefined;
-            });
+            // [DEBUG] Log pick attempt
+            console.log(`[TacticalDesign] Edit mode - picking at (${pointerX}, ${pointerY})`);
 
-            if (pickResult?.hit && pickResult.pickedMesh) {
-                const node = this.fateLinker.findNodeByMesh(pickResult.pickedMesh);
-                if (node) {
-                    this.fateLinker.selectNode(node.index);
-                    console.log(`[TacticalDesign] Edit mode - selected node ${node.index}`);
+            // Create picking ray from MAIN scene camera
+            const camera = this.camera ?? this.scene.activeCamera;
+            if (!camera) {
+                console.warn('[TacticalDesign] No camera for picking');
+                return;
+            }
+
+            const ray = this.scene.createPickingRay(
+                pointerX,
+                pointerY,
+                BABYLON.Matrix.Identity(),
+                camera
+            );
+
+            // [DEBUG] Log ray info
+            console.log('[TacticalDesign] Pick ray:', ray.origin.toString(), ray.direction.toString());
+
+            // Manual intersection test against all nodes using hitProxy radius
+            const nodes = this.fateLinker.getAllNodes();
+            let closestNode: FateNode | null = null;
+            let closestDistance = Infinity;
+
+            // HitProxy radius: 0.5 * 3.0 / 2 = 0.75 (FateNode.HIT_PROXY_SCALE = 3.0)
+            const hitProxyRadius = 0.75;
+
+            for (const node of nodes) {
+                // Get world position of the node anchor
+                const nodeWorldPos = node.anchor.position;
+
+                // Ray-sphere intersection using hitProxy radius
+                const toNode = nodeWorldPos.subtract(ray.origin);
+                const tca = BABYLON.Vector3.Dot(toNode, ray.direction);
+
+                if (tca < 0) continue; // Node is behind ray origin
+
+                const d2 = BABYLON.Vector3.Dot(toNode, toNode) - tca * tca;
+                const r2 = hitProxyRadius * hitProxyRadius;
+
+                if (d2 > r2) continue; // Ray misses hitProxy sphere
+
+                const thc = Math.sqrt(r2 - d2);
+                const t = tca - thc;
+
+                if (t > 0 && t < closestDistance) {
+                    closestDistance = t;
+                    closestNode = node;
                 }
+            }
+
+            // [DEBUG] Log result
+            console.log(`[TacticalDesign] Pick result: ${closestNode ? `node ${closestNode.index}` : 'none'}`);
+
+            if (closestNode) {
+                this.fateLinker.selectNode(closestNode.index);
+                console.log(`[TacticalDesign] Edit mode - selected node ${closestNode.index}`);
             } else {
                 // Tap on empty space in edit mode: deselect
                 this.fateLinker.deselectAll();
@@ -311,7 +448,7 @@ export class TacticalDesignController {
     }
 
     /**
-     * Remove selected node
+     * Remove selected node (via action stack for undo support)
      */
     removeSelectedNode(): boolean {
         if (this.isLocked || this.disposed) return false;
@@ -319,29 +456,39 @@ export class TacticalDesignController {
         const selectedIndex = this.fateLinker.getSelectedIndex();
         if (selectedIndex < 0) return false;
 
-        const removed = this.fateLinker.removeNode(selectedIndex);
-        if (removed) {
-            this.callbacks.onNodeRemoved?.(selectedIndex);
-        }
-        return removed;
+        // Create and execute delete action
+        const action = new DeleteNodeAction(selectedIndex, this.nodeActionCallbacks);
+        this.actionStack.execute(action);
+
+        this.gizmoController.detach();
+        this.callbacks.onNodeRemoved?.(selectedIndex);
+        return true;
     }
 
     /**
-     * Remove last node
+     * Remove last node (via action stack for undo support)
      */
     removeLastNode(): boolean {
         if (this.isLocked || this.disposed) return false;
-        return this.fateLinker.removeLastNode();
+        if (this.fateLinker.getNodeCount() === 0) return false;
+
+        const lastIndex = this.fateLinker.getNodeCount() - 1;
+        const action = new DeleteNodeAction(lastIndex, this.nodeActionCallbacks);
+        this.actionStack.execute(action);
+
+        this.callbacks.onNodeRemoved?.(lastIndex);
+        return true;
     }
 
     /**
-     * Clear all nodes
+     * Clear all nodes (also clears action stack)
      */
     clearAllNodes(): void {
         if (this.isLocked || this.disposed) return;
 
         this.gizmoController.detach();
         this.fateLinker.clear();
+        this.actionStack.clear();
     }
 
     /**
@@ -355,6 +502,7 @@ export class TacticalDesignController {
      * Get current state
      */
     getState(): TacticalDesignState {
+        const inEditableMode = this.inputMode !== 'camera';
         return {
             nodeCount: this.fateLinker.getNodeCount(),
             maxNodes: this.fateLinker.getMaxNodes(),
@@ -363,16 +511,44 @@ export class TacticalDesignController {
             canAddNode: this.fateLinker.canAddNode() && !this.isLocked,
             canLaunch: this.fateLinker.getNodeCount() >= 2 && !this.isLocked,
             inputMode: this.inputMode,
+            undoDepth: this.actionStack.getUndoDepth(),
+            redoDepth: this.actionStack.getRedoDepth(),
+            canUndo: this.actionStack.canUndo() && inEditableMode && !this.isLocked,
+            canRedo: this.actionStack.canRedo() && inEditableMode && !this.isLocked,
         };
+    }
+
+    /**
+     * Undo last action
+     * Only available in Node/Edit modes
+     */
+    undo(): boolean {
+        if (this.isLocked || this.inputMode === 'camera') {
+            console.log('[TacticalDesign] Undo blocked: camera mode or locked');
+            return false;
+        }
+        return this.actionStack.undo();
+    }
+
+    /**
+     * Redo last undone action
+     * Only available in Node/Edit modes
+     */
+    redo(): boolean {
+        if (this.isLocked || this.inputMode === 'camera') {
+            console.log('[TacticalDesign] Redo blocked: camera mode or locked');
+            return false;
+        }
+        return this.actionStack.redo();
     }
 
     /**
      * Set input mode
      *
      * Mode transitions:
-     * - camera: Deselect all nodes, detach gizmo
-     * - place: Deselect all nodes, detach gizmo
-     * - edit: Ready for node selection
+     * - camera: Enable camera controls, detach gizmo, disable node picking
+     * - place: Disable camera controls, detach gizmo, disable node picking
+     * - edit: Disable camera controls, enable node picking for selection
      */
     setInputMode(mode: TacticalInputMode): void {
         if (this.inputMode === mode) return;
@@ -380,15 +556,48 @@ export class TacticalDesignController {
         const prevMode = this.inputMode;
         this.inputMode = mode;
 
+        // Camera control based on mode
+        this.updateCameraControls(mode);
+
         // Mode transition logic
-        if (mode === 'camera' || mode === 'place') {
-            // Camera/Place: detach gizmo, deselect
+        if (mode === 'camera') {
+            // Camera: detach gizmo, deselect, no node interaction
             this.gizmoController.detach();
             this.fateLinker.deselectAll();
+            this.fateLinker.setAllNodesPickable(false);
+        } else if (mode === 'place') {
+            // Place: detach gizmo, deselect, no node interaction
+            this.gizmoController.detach();
+            this.fateLinker.deselectAll();
+            this.fateLinker.setAllNodesPickable(false);
+        } else if (mode === 'edit') {
+            // Edit: enable picking for node selection
+            this.fateLinker.setAllNodesPickable(true);
         }
 
         this.notifyStateChange();
         console.log(`[TacticalDesign] Input mode: ${prevMode} → ${mode}`);
+    }
+
+    /**
+     * Update camera controls based on mode
+     * Camera controls only active in camera mode
+     */
+    private updateCameraControls(mode: TacticalInputMode): void {
+        if (!this.camera) return;
+
+        const canvas = this.scene.getEngine().getRenderingCanvas();
+        if (!canvas) return;
+
+        if (mode === 'camera') {
+            // Enable camera controls for orbit + pan
+            this.camera.attachControl(canvas, true);
+            console.log('[TacticalDesign] Camera controls enabled (orbit + pan)');
+        } else {
+            // Disable camera controls in place/edit modes
+            this.camera.detachControl();
+            console.log('[TacticalDesign] Camera controls disabled');
+        }
     }
 
     /**
