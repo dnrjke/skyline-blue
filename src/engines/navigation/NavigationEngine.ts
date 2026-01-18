@@ -5,6 +5,8 @@ import type { LoadingDebugger } from '../../shared/ui/LoadingDebugger';
 
 export interface NavigationEngineConfig {
     energyBudget: number;
+    /** Character model path for flight animation */
+    characterModelPath?: string;
 }
 
 export interface NavigationStageKey {
@@ -58,6 +60,20 @@ export class NavigationEngine {
 
     getFlightCurve(): BABYLON.Curve3 | null {
         return this.navScene.getFlightCurve();
+    }
+
+    /**
+     * Toggle animation debug panel visibility
+     */
+    toggleDebugPanel(): void {
+        this.navScene.toggleDebugPanel();
+    }
+
+    /**
+     * Show animation debug panel
+     */
+    showDebugPanel(): void {
+        this.navScene.showDebugPanel();
     }
 
     dispose(): void {

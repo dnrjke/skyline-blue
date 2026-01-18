@@ -119,9 +119,10 @@ class Main {
             this.guiManager.getSkipLayer()
         );
 
-        // Phase 2 Navigation Engine (SystemLayer UI)
+        // Phase 3 Navigation Engine (SystemLayer UI)
         this.navigationEngine = new NavigationEngine(this.scene, this.guiManager.getSystemLayer(), {
             energyBudget: 60,
+            characterModelPath: '/assets/characters/pilot.glb',
         });
 
         // Resize/DPI handling is owned by RenderQualityManager (Phase 2.6)
