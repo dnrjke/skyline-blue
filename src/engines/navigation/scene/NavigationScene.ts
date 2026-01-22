@@ -39,7 +39,7 @@ import {
 } from '../loading/units';
 
 // Phase 3: Character Loading
-import { CharacterLoadUnit } from '../loading/CharacterLoadUnit';
+import { CharacterLoadUnit, type FlightAnimationRole } from '../loading/CharacterLoadUnit';
 
 export interface NavigationSceneConfig {
     /** @deprecated Energy budget is no longer used in Phase 3 */
@@ -76,6 +76,8 @@ export class NavigationScene {
 
     // UI
     private hud: TacticalHUD | null = null;
+    private debugPanel: AnimationDebugPanel | null = null;
+    private characterVisible: boolean = false;
 
     // State
     private active: boolean = false;
@@ -125,6 +127,15 @@ export class NavigationScene {
             onRedo: () => this.handleRedo(),
             onConfirm: () => this.confirmAndLaunch(),
             onSetMode: (mode) => this.setInputMode(mode),
+            onToggleDebug: () => this.toggleDebugPanel(),
+        });
+
+        // Create Animation Debug Panel
+        this.debugPanel = new AnimationDebugPanel(systemLayer, {
+            onPlayRole: (role) => this.debugPlayRole(role),
+            onToggleVisibility: () => this.debugToggleCharacter(),
+            onAdjustCamera: (preset) => this.debugSetCameraPreset(preset),
+            onStopAnimation: () => this.debugStopAnimation(),
         });
     }
 
@@ -531,15 +542,38 @@ export class NavigationScene {
             // Simulate flight without character
             await this.simulateFlight(path3D);
         } else {
+            // Position character at start of path
+            const startPosition = path3D.getPoints()[0];
+            this.characterLoadUnit?.setPosition(startPosition);
+            this.characterLoadUnit?.setVisibility(true);
+
             // Initialize and start flight
             this.flightController.initialize(character, path3D);
 
-            // Play fly animation
-            this.characterLoadUnit?.playAnimation('Fly', true);
+            // Play flight animation using semantic role
+            this.characterLoadUnit?.playRole('flight', true);
+
+            // Transition camera to follow mode
+            this.transitionToFlightCamera(startPosition);
 
             const result = await this.flightController.startFlight();
             this.onFlightComplete(result);
         }
+    }
+
+    /**
+     * Transition camera for flight view
+     * Considers 2.5D perspective for proper character visibility
+     */
+    private transitionToFlightCamera(startPosition: BABYLON.Vector3): void {
+        if (!this.navigationCamera) return;
+
+        // For 2.5D view: camera looks at character from a fixed angle
+        // Adjust beta (vertical angle) to see character properly
+        this.navigationCamera.target = startPosition;
+        this.navigationCamera.radius = 12;
+        this.navigationCamera.beta = 1.2; // Slightly above horizontal
+        this.navigationCamera.alpha = -Math.PI / 2;
     }
 
     private async simulateFlight(path3D: BABYLON.Path3D): Promise<void> {
@@ -588,13 +622,32 @@ export class NavigationScene {
         this.isFlying = false;
         this.inputLocked = false;
 
+        // Hide character and stop animations
+        this.characterLoadUnit?.setVisibility(false);
+        this.characterLoadUnit?.stopAllAnimations();
+
         // Unlock tactical editing
         this.tacticalDesign.unlock();
 
         // Reset wind trail mode
         this.tacticalDesign.getWindTrail().setMode('design');
 
+        // Reset camera to tactical view
+        this.resetToTacticalCamera();
+
         console.log('[NavigationScene] Returned to design phase');
+    }
+
+    /**
+     * Reset camera to tactical design view
+     */
+    private resetToTacticalCamera(): void {
+        if (!this.navigationCamera) return;
+
+        this.navigationCamera.target = new BABYLON.Vector3(0, 0.8, 0);
+        this.navigationCamera.radius = 26;
+        this.navigationCamera.beta = 1.02;
+        this.navigationCamera.alpha = -Math.PI / 2;
     }
 
     /**
@@ -608,11 +661,118 @@ export class NavigationScene {
         return BABYLON.Curve3.CreateCatmullRomSpline(inGamePoints, 24, false);
     }
 
+    // ========== DEBUG METHODS ==========
+
+    /**
+     * Toggle debug panel visibility
+     */
+    toggleDebugPanel(): void {
+        this.debugPanel?.toggle();
+    }
+
+    /**
+     * Show debug panel
+     */
+    showDebugPanel(): void {
+        this.debugPanel?.show();
+    }
+
+    /**
+     * Debug: Play animation role
+     */
+    private debugPlayRole(role: FlightAnimationRole): void {
+        if (!this.characterLoadUnit) {
+            console.warn('[Debug] No character loaded');
+            return;
+        }
+
+        // Make sure character is visible
+        if (!this.characterVisible) {
+            this.debugToggleCharacter();
+        }
+
+        this.characterLoadUnit.playRole(role, true);
+        console.log(`[Debug] Playing role: ${role}`);
+    }
+
+    /**
+     * Debug: Toggle character visibility
+     */
+    private debugToggleCharacter(): void {
+        if (!this.characterLoadUnit) {
+            console.warn('[Debug] No character loaded');
+            return;
+        }
+
+        this.characterVisible = !this.characterVisible;
+        this.characterLoadUnit.setVisibility(this.characterVisible);
+
+        // Position character at origin if showing for first time
+        if (this.characterVisible) {
+            const character = this.characterLoadUnit.getCharacter();
+            if (character) {
+                character.position = new BABYLON.Vector3(0, 1, 0);
+            }
+        }
+
+        console.log(`[Debug] Character visibility: ${this.characterVisible}`);
+    }
+
+    /**
+     * Debug: Set camera preset for 2.5D view testing
+     */
+    private debugSetCameraPreset(preset: 'top' | 'side' | 'front' | '2.5d'): void {
+        if (!this.navigationCamera) return;
+
+        switch (preset) {
+            case 'top':
+                this.navigationCamera.alpha = -Math.PI / 2;
+                this.navigationCamera.beta = 0.1; // Almost vertical
+                this.navigationCamera.radius = 20;
+                break;
+            case 'side':
+                this.navigationCamera.alpha = 0;
+                this.navigationCamera.beta = Math.PI / 2;
+                this.navigationCamera.radius = 15;
+                break;
+            case 'front':
+                this.navigationCamera.alpha = -Math.PI / 2;
+                this.navigationCamera.beta = Math.PI / 2;
+                this.navigationCamera.radius = 15;
+                break;
+            case '2.5d':
+                // Optimal 2.5D view for this character
+                this.navigationCamera.alpha = -Math.PI / 2 - 0.3;
+                this.navigationCamera.beta = 1.1;
+                this.navigationCamera.radius = 12;
+                break;
+        }
+
+        // Focus on character position
+        if (this.characterVisible && this.characterLoadUnit) {
+            const char = this.characterLoadUnit.getCharacter();
+            if (char) {
+                this.navigationCamera.target = char.position.clone();
+            }
+        }
+
+        console.log(`[Debug] Camera preset: ${preset}`);
+    }
+
+    /**
+     * Debug: Stop all animations
+     */
+    private debugStopAnimation(): void {
+        this.characterLoadUnit?.stopAllAnimations();
+        console.log('[Debug] Stopped all animations');
+    }
+
     dispose(): void {
         this.stop();
         this.tacticalDesign.dispose();
         this.flightController.dispose();
         this.hud?.dispose();
+        this.debugPanel?.dispose();
     }
 }
 
@@ -649,12 +809,13 @@ class TacticalHUD {
             onRedo: () => void;
             onConfirm: () => void;
             onSetMode: (mode: TacticalInputMode) => void;
+            onToggleDebug: () => void;
         }
     ) {
         // Main container
         this.container = new GUI.Rectangle('TacticalHUD');
         this.container.width = '340px';
-        this.container.height = '220px';
+        this.container.height = '260px'; // Increased for debug button
         this.container.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
         this.container.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
         this.container.top = '20px';
@@ -747,6 +908,15 @@ class TacticalHUD {
         this.confirmButton.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
         this.confirmButton.onPointerClickObservable.add(() => callbacks.onConfirm());
         this.container.addControl(this.confirmButton);
+
+        // === DEBUG TOGGLE BUTTON ===
+        const debugButton = this.createActionButton('🔧 DEBUG', 'rgba(255, 150, 50, 0.8)', 80);
+        debugButton.height = '32px';
+        debugButton.fontSize = 11;
+        debugButton.top = '228px';
+        debugButton.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        debugButton.onPointerClickObservable.add(() => callbacks.onToggleDebug());
+        this.container.addControl(debugButton);
     }
 
     private createModeButton(text: string, bgColor: string): GUI.Button {
@@ -864,6 +1034,163 @@ class TacticalHUD {
         this.cameraModeBtn.alpha = isLocked ? 0.5 : 1;
         this.placeModeBtn.alpha = isLocked ? 0.5 : 1;
         this.editModeBtn.alpha = isLocked ? 0.5 : 1;
+    }
+
+    dispose(): void {
+        this.container.dispose();
+    }
+}
+
+/**
+ * AnimationDebugPanel - Debug UI for testing character animations
+ *
+ * Features:
+ * - Show/hide character for testing
+ * - Buttons for each animation role (flight, boost, rollLeft, rollHold)
+ * - Camera position controls for 2.5D view testing
+ */
+class AnimationDebugPanel {
+    private container: GUI.Rectangle;
+    private visible: boolean = false;
+
+    constructor(
+        parent: GUI.Rectangle,
+        callbacks: {
+            onPlayRole: (role: FlightAnimationRole) => void;
+            onToggleVisibility: () => void;
+            onAdjustCamera: (preset: 'top' | 'side' | 'front' | '2.5d') => void;
+            onStopAnimation: () => void;
+        }
+    ) {
+
+        // Left-side debug panel
+        this.container = new GUI.Rectangle('AnimDebugPanel');
+        this.container.width = '180px';
+        this.container.height = '320px';
+        this.container.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+        this.container.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        this.container.top = '20px';
+        this.container.left = '20px';
+        this.container.background = 'rgba(0, 0, 0, 0.85)';
+        this.container.cornerRadius = 10;
+        this.container.thickness = 2;
+        this.container.color = 'rgba(255, 200, 100, 0.7)';
+        this.container.isVisible = false;
+        parent.addControl(this.container);
+
+        // Title
+        const title = new GUI.TextBlock('title', '🎬 Animation Debug');
+        title.height = '28px';
+        title.top = '8px';
+        title.color = 'rgba(255, 200, 100, 1)';
+        title.fontSize = 14;
+        title.fontWeight = 'bold';
+        title.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        this.container.addControl(title);
+
+        // Content panel
+        const content = new GUI.StackPanel('content');
+        content.top = '40px';
+        content.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        content.spacing = 6;
+        this.container.addControl(content);
+
+        // Toggle visibility button
+        const toggleBtn = this.createButton('👁 Toggle Character', 'rgba(80, 80, 120, 0.9)');
+        toggleBtn.onPointerClickObservable.add(() => callbacks.onToggleVisibility());
+        content.addControl(toggleBtn);
+
+        // Animation role buttons
+        const flightBtn = this.createButton('✈ Flight', 'rgba(60, 120, 180, 0.9)');
+        flightBtn.onPointerClickObservable.add(() => callbacks.onPlayRole('flight'));
+        content.addControl(flightBtn);
+
+        const boostBtn = this.createButton('🚀 Boost', 'rgba(180, 120, 60, 0.9)');
+        boostBtn.onPointerClickObservable.add(() => callbacks.onPlayRole('boost'));
+        content.addControl(boostBtn);
+
+        const rollLeftBtn = this.createButton('↩ Roll Left', 'rgba(120, 180, 60, 0.9)');
+        rollLeftBtn.onPointerClickObservable.add(() => callbacks.onPlayRole('rollLeft'));
+        content.addControl(rollLeftBtn);
+
+        const rollHoldBtn = this.createButton('⟳ Roll Hold', 'rgba(60, 180, 120, 0.9)');
+        rollHoldBtn.onPointerClickObservable.add(() => callbacks.onPlayRole('rollHold'));
+        content.addControl(rollHoldBtn);
+
+        const stopBtn = this.createButton('⏹ Stop', 'rgba(180, 60, 60, 0.9)');
+        stopBtn.onPointerClickObservable.add(() => callbacks.onStopAnimation());
+        content.addControl(stopBtn);
+
+        // Camera presets section
+        const camLabel = new GUI.TextBlock('camLabel', '📷 Camera Preset');
+        camLabel.height = '24px';
+        camLabel.color = 'rgba(200, 200, 200, 0.8)';
+        camLabel.fontSize = 11;
+        content.addControl(camLabel);
+
+        const camPanel = new GUI.StackPanel('camPanel');
+        camPanel.isVertical = false;
+        camPanel.height = '36px';
+        camPanel.spacing = 4;
+        content.addControl(camPanel);
+
+        const topBtn = this.createSmallButton('Top');
+        topBtn.onPointerClickObservable.add(() => callbacks.onAdjustCamera('top'));
+        camPanel.addControl(topBtn);
+
+        const sideBtn = this.createSmallButton('Side');
+        sideBtn.onPointerClickObservable.add(() => callbacks.onAdjustCamera('side'));
+        camPanel.addControl(sideBtn);
+
+        const frontBtn = this.createSmallButton('Front');
+        frontBtn.onPointerClickObservable.add(() => callbacks.onAdjustCamera('front'));
+        camPanel.addControl(frontBtn);
+
+        const twoFiveBtn = this.createSmallButton('2.5D');
+        twoFiveBtn.onPointerClickObservable.add(() => callbacks.onAdjustCamera('2.5d'));
+        camPanel.addControl(twoFiveBtn);
+    }
+
+    private createButton(text: string, bgColor: string): GUI.Button {
+        const btn = GUI.Button.CreateSimpleButton(`btn_${text}`, text);
+        btn.width = '160px';
+        btn.height = '36px';
+        btn.color = 'white';
+        btn.background = bgColor;
+        btn.cornerRadius = 6;
+        btn.fontSize = 12;
+        btn.fontWeight = 'bold';
+        return btn;
+    }
+
+    private createSmallButton(text: string): GUI.Button {
+        const btn = GUI.Button.CreateSimpleButton(`cam_${text}`, text);
+        btn.width = '38px';
+        btn.height = '32px';
+        btn.color = 'white';
+        btn.background = 'rgba(100, 100, 100, 0.8)';
+        btn.cornerRadius = 4;
+        btn.fontSize = 10;
+        return btn;
+    }
+
+    toggle(): void {
+        this.visible = !this.visible;
+        this.container.isVisible = this.visible;
+    }
+
+    show(): void {
+        this.visible = true;
+        this.container.isVisible = true;
+    }
+
+    hide(): void {
+        this.visible = false;
+        this.container.isVisible = false;
+    }
+
+    isVisible(): boolean {
+        return this.visible;
     }
 
     dispose(): void {

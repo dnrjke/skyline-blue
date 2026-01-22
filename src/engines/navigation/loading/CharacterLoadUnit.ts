@@ -13,6 +13,39 @@ import * as BABYLON from '@babylonjs/core';
 import { BaseLoadUnit, type LoadUnitProgress, LoadUnitStatus } from '../../../core/loading/unit/LoadUnit';
 import { LoadingPhase } from '../../../core/loading/protocol/LoadingPhase';
 
+/**
+ * Semantic animation roles for flight character
+ */
+export type FlightAnimationRole = 'flight' | 'boost' | 'rollLeft' | 'rollHold';
+
+/**
+ * Animation mapping: role -> actual animation name in GLB
+ */
+export interface AnimationMapping {
+    /** Default flight animation */
+    flight: string;
+    /** Boost/acceleration animation */
+    boost: string;
+    /** Roll left action */
+    rollLeft: string;
+    /** Roll hold state */
+    rollHold: string;
+}
+
+/**
+ * Default animation mapping for pilot.glb
+ * - Index 0: Anim_Idle_base = 기본비행
+ * - Index 1: Anim_Idle_Windy = 가속모션
+ * - Index 2: Anim_Lrow.002 = 롤링 상태 유지
+ * - Index 3: Anim_Lrow.1 = 왼쪽 롤링
+ */
+const DEFAULT_ANIMATION_MAPPING: AnimationMapping = {
+    flight: 'Anim_Idle_base',
+    boost: 'Anim_Idle_Windy',
+    rollLeft: 'Anim_Lrow.1',
+    rollHold: 'Anim_Lrow.002',
+};
+
 export interface CharacterLoadUnitConfig {
     /** Path to character .glb file */
     modelPath: string;
@@ -22,6 +55,8 @@ export interface CharacterLoadUnitConfig {
     initialPosition?: BABYLON.Vector3;
     /** Initial scale */
     initialScale?: number;
+    /** Custom animation mapping (optional) */
+    animationMapping?: Partial<AnimationMapping>;
 }
 
 /**
@@ -37,13 +72,24 @@ export class CharacterLoadUnit extends BaseLoadUnit {
     readonly requiredForReady = true;
 
     // Configuration
-    private config: Required<CharacterLoadUnitConfig>;
+    private config: {
+        modelPath: string;
+        characterName: string;
+        initialPosition: BABYLON.Vector3;
+        initialScale: number;
+    };
+
+    // Animation mapping
+    private animationMapping: AnimationMapping;
 
     // Loaded assets
     private rootMesh: BABYLON.AbstractMesh | null = null;
     private meshes: BABYLON.AbstractMesh[] = [];
     private animationGroups: Map<string, BABYLON.AnimationGroup> = new Map();
     private skeletons: BABYLON.Skeleton[] = [];
+
+    // Current animation state
+    private currentRole: FlightAnimationRole | null = null;
 
     constructor(config: CharacterLoadUnitConfig) {
         super();
@@ -52,6 +98,10 @@ export class CharacterLoadUnit extends BaseLoadUnit {
             characterName: config.characterName ?? 'FlightCharacter',
             initialPosition: config.initialPosition ?? BABYLON.Vector3.Zero(),
             initialScale: config.initialScale ?? 1,
+        };
+        this.animationMapping = {
+            ...DEFAULT_ANIMATION_MAPPING,
+            ...config.animationMapping,
         };
     }
 
@@ -187,12 +237,45 @@ export class CharacterLoadUnit extends BaseLoadUnit {
     }
 
     /**
+     * Play animation by semantic role
+     */
+    playRole(role: FlightAnimationRole, loop: boolean = true): boolean {
+        const animName = this.animationMapping[role];
+        if (!animName) {
+            console.warn(`[CharacterLoadUnit] No mapping for role: ${role}`);
+            return false;
+        }
+
+        const success = this.playAnimation(animName, loop);
+        if (success) {
+            this.currentRole = role;
+            console.log(`[CharacterLoadUnit] Playing role: ${role} (${animName})`);
+        }
+        return success;
+    }
+
+    /**
+     * Get current animation role
+     */
+    getCurrentRole(): FlightAnimationRole | null {
+        return this.currentRole;
+    }
+
+    /**
+     * Get animation mapping
+     */
+    getAnimationMapping(): AnimationMapping {
+        return { ...this.animationMapping };
+    }
+
+    /**
      * Stop all animations
      */
     stopAllAnimations(): void {
         for (const [, group] of this.animationGroups) {
             group.stop();
         }
+        this.currentRole = null;
     }
 
     /**
