@@ -107,7 +107,10 @@ export class NavigationScene {
         });
 
         this.flightController = new FlightController(scene, {
-            speed: 8,
+            baseSpeed: 6,
+            maxSpeed: 14,
+            acceleration: 1.5,
+            bankingIntensity: 1.8,
         });
 
         this.mapper = new CoordinateMapper();
@@ -547,33 +550,17 @@ export class NavigationScene {
             this.characterLoadUnit?.setPosition(startPosition);
             this.characterLoadUnit?.setVisibility(true);
 
-            // Initialize and start flight
+            // Initialize flight (FlightController handles camera via AceCombatChaseCamera)
             this.flightController.initialize(character, path3D);
 
             // Play flight animation using semantic role
             this.characterLoadUnit?.playRole('flight', true);
 
-            // Transition camera to follow mode
-            this.transitionToFlightCamera(startPosition);
-
+            // Start Ace Combat style flight
+            // NOTE: Camera is automatically managed by FlightController's AceCombatChaseCamera
             const result = await this.flightController.startFlight();
             this.onFlightComplete(result);
         }
-    }
-
-    /**
-     * Transition camera for flight view
-     * Considers 2.5D perspective for proper character visibility
-     */
-    private transitionToFlightCamera(startPosition: BABYLON.Vector3): void {
-        if (!this.navigationCamera) return;
-
-        // For 2.5D view: camera looks at character from a fixed angle
-        // Adjust beta (vertical angle) to see character properly
-        this.navigationCamera.target = startPosition;
-        this.navigationCamera.radius = 12;
-        this.navigationCamera.beta = 1.2; // Slightly above horizontal
-        this.navigationCamera.alpha = -Math.PI / 2;
     }
 
     private async simulateFlight(path3D: BABYLON.Path3D): Promise<void> {
