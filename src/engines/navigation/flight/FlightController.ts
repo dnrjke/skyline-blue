@@ -6,6 +6,12 @@
  * - Visual integrity: Character-Path-Camera alignment never breaks
  * - Pure Path3D interpolation (NO Dijkstra/Legacy)
  *
+ * ORIENTATION RULES:
+ * - Model Forward Axis: Explicit constant (adjustable per model)
+ * - Initial Direction: getTangentAt(0) - path tangent at start
+ * - Rotation Method: FromLookDirectionLH only (NO lookAt)
+ * - rotationQuaternion MUST be used (NOT euler rotation)
+ *
  * Invariants:
  * - START is completely deterministic
  * - Flight completes exactly once: Node[0] → Node[N]
@@ -15,9 +21,9 @@
  * ❌ ABSOLUTELY FORBIDDEN:
  * - Legacy Path/Dijkstra calls
  * - Lerp initialization at START (breaks determinism)
- * - activeMeshes-based validation
+ * - lookAt() for orientation (pivot/scale issues)
+ * - euler rotation (gimbal lock risk)
  * - Implicit forward axis handling
- * - Path progression without completion logic
  */
 
 import * as BABYLON from '@babylonjs/core';
@@ -30,6 +36,17 @@ const COMPLETION_EPSILON = 0.001;
 
 /** Minimum nodes required for flight */
 const MIN_NODES_REQUIRED = 2;
+
+/**
+ * Model Forward Axis Correction
+ *
+ * Babylon.js LH 좌표계: +Z = Forward
+ * 모델 좌표계 (Blender GLB): -Z = Forward (일반적)
+ *
+ * 이 값이 true이면 방향을 180° 반전시킴
+ * 모델이 뒤집혀 보이면 이 값을 toggle
+ */
+const MODEL_NEEDS_FLIP = true;
 
 // ========== INTERFACES ==========
 
@@ -169,11 +186,13 @@ export class FlightController {
     /**
      * Initialize flight with character and path
      *
-     * DETERMINISTIC INITIALIZATION:
+     * DETERMINISTIC INITIALIZATION (6.1, 6.2, 6.3):
      * - Validates node count (minimum 2)
-     * - Snaps character to Node[0]
-     * - Forces rotation to Node[0] → Node[1] direction
+     * - Snaps character position to Node[0] (6.1)
+     * - Uses getTangentAt(0) for forward direction (6.2)
+     * - Applies model forward axis correction (6.3)
      * - NO lerp, NO interpolation at init
+     * - NO lookAt() - only FromLookDirectionLH
      */
     initialize(character: BABYLON.AbstractMesh, path: BABYLON.Path3D): void {
         if (this.disposed) return;
@@ -194,32 +213,39 @@ export class FlightController {
         // Calculate total path length
         this.totalPathLength = this.calculatePathLength(path);
 
-        // ===== CHARACTER RESET - SNAP (1-2) =====
+        // ===== 6.1 POSITION SNAP =====
         const startPos = points[0];
-        const nextPos = points[1];
-
-        // SNAP position (no interpolation)
         character.position.copyFrom(startPos);
 
-        // ===== FORWARD AXIS & ROTATION (1-3) =====
-        // Calculate initial direction: Node[0] → Node[1]
-        const initialDirection = nextPos.subtract(startPos).normalize();
+        // ===== 6.2 FORWARD DIRECTION - getTangentAt(0) =====
+        // Path3D tangent at t=0 gives us the exact forward direction
+        let forwardDirection = path.getTangentAt(0).normalize();
 
-        // Ensure rotationQuaternion is initialized
+        // ===== 6.3 MODEL FORWARD AXIS CORRECTION =====
+        // Blender GLB models typically have -Z as forward
+        // Babylon.js LH uses +Z as forward
+        // If model appears backwards, flip the direction
+        if (MODEL_NEEDS_FLIP) {
+            forwardDirection = forwardDirection.negate();
+        }
+
+        // ===== ROTATION SNAP (NO lookAt, NO lerp) =====
+        // Ensure rotationQuaternion exists (MUST use quaternion, not euler)
         if (!character.rotationQuaternion) {
             character.rotationQuaternion = BABYLON.Quaternion.Identity();
         }
 
-        // SNAP rotation (no interpolation) - using explicit forward axis
+        // Create rotation directly from direction vector
+        // FromLookDirectionLH: makes +Z axis point toward forwardDirection
         character.rotationQuaternion = BABYLON.Quaternion.FromLookDirectionLH(
-            initialDirection,
+            forwardDirection,
             BABYLON.Vector3.Up()
         );
 
         // Set camera speed range
         this.chaseCamera?.setSpeedRange(this.config.baseSpeed, this.config.maxSpeed);
 
-        console.log(`[FlightController] Initialized: path=${this.totalPathLength.toFixed(2)}, nodes=${points.length}`);
+        console.log(`[FlightController] Initialized: path=${this.totalPathLength.toFixed(2)}, nodes=${points.length}, flip=${MODEL_NEEDS_FLIP}`);
     }
 
     /**
@@ -424,6 +450,11 @@ export class FlightController {
 
     /**
      * Update character orientation with look-ahead and banking
+     *
+     * CONTINUOUS HEADING INTEGRITY (7.1):
+     * - Position: getPointAt(t)
+     * - Direction: getTangentAt(t) with MODEL_NEEDS_FLIP correction
+     * - Rotation: FromLookDirectionLH + Slerp smoothing
      */
     private updateCharacterOrientation(
         tangent: BABYLON.Vector3,
@@ -432,19 +463,26 @@ export class FlightController {
     ): void {
         if (!this.character || !this.path3D) return;
 
-        // ===== LOOK-AHEAD FOR SMOOTH HEADING (2-3) =====
+        // ===== LOOK-AHEAD FOR SMOOTH HEADING (7.1, 2-3) =====
         // On curves, predict heading direction slightly ahead
         const lookAheadT = Math.min(this.currentT + 0.02, 1.0);
-        const lookAheadTangent = this.path3D.getTangentAt(lookAheadT).normalize();
+        let lookAheadTangent = this.path3D.getTangentAt(lookAheadT).normalize();
+
+        // Apply MODEL_NEEDS_FLIP correction (same as initialization)
+        let correctedTangent = tangent.clone();
+        if (MODEL_NEEDS_FLIP) {
+            correctedTangent = correctedTangent.negate();
+            lookAheadTangent = lookAheadTangent.negate();
+        }
 
         // Blend current tangent with look-ahead for smooth transitions
         const blendedTangent = BABYLON.Vector3.Lerp(
-            tangent,
+            correctedTangent,
             lookAheadTangent,
             this.config.lookAheadFactor
         ).normalize();
 
-        // Calculate base rotation from blended tangent
+        // Calculate base rotation from blended tangent (NO lookAt)
         const baseRotation = BABYLON.Quaternion.FromLookDirectionLH(
             blendedTangent,
             BABYLON.Vector3.Up()
@@ -462,7 +500,7 @@ export class FlightController {
         const bankRotation = BABYLON.Quaternion.RotationAxis(blendedTangent, this.currentBankAngle);
         const finalRotation = baseRotation.multiply(bankRotation);
 
-        // ===== SMOOTH ROTATION INTERPOLATION =====
+        // ===== SMOOTH ROTATION INTERPOLATION (Slerp) =====
         const currentRotation = this.character.rotationQuaternion ?? BABYLON.Quaternion.Identity();
         const smoothedRotation = BABYLON.Quaternion.Slerp(
             currentRotation,
