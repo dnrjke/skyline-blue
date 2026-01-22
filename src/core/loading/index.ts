@@ -75,6 +75,10 @@ export { createSuccessResult, createFailureResult } from './protocol/LoadingResu
 export { RenderReadyBarrier, BarrierResult } from './barrier/RenderReadyBarrier';
 export type { BarrierValidation, BarrierEvidence, BarrierRequirement } from './barrier/RenderReadyBarrier';
 
+// Engine Awakened Barrier (POST_READY verification)
+export { EngineAwakenedBarrier, waitForEngineAwakened } from './barrier/EngineAwakenedBarrier';
+export type { EngineAwakenedConfig, EngineAwakenedResult } from './barrier/EngineAwakenedBarrier';
+
 // ========================================
 // Legacy: BaseSceneLoader (호환성 유지)
 // ========================================
