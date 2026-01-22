@@ -30,6 +30,7 @@ import {
     BarrierRequirement,
     VisualReadyUnit,
     createTacticalGridVisualRequirement,
+    waitForEngineAwakened,
     type LoadUnit,
 } from '../../../core/loading';
 import {
@@ -348,32 +349,61 @@ export class NavigationScene {
             const result = await this.orchestrator.execute({
                 onLog: hooks?.onLog,
                 onReady: () => {
-                    console.log('[READY] Loading complete, starting camera transition');
-                    hooks?.onLog?.('[READY] reached');
+                    // READY = Logical loading complete (NOT UX ready)
+                    console.log('[READY] Logical loading complete, waiting for engine awakening...');
+                    hooks?.onLog?.('[READY] reached - stabilizing view...');
 
                     // ===== DEBUG: Start Render Desync Probe =====
                     this.renderDesyncProbe?.startProbe();
 
+                    // Start camera transition (visual only)
                     this.cameraController.transitionIn(LAYOUT.HOLOGRAM.GRID_SIZE / 2, () => {
-                        this.scene.onAfterRenderObservable.addOnce(() => {
-                            this.inputLocked = false;
-                            console.log('[POST_READY] Input unlocked');
-
-                            // ===== POST_READY CAMERA RESTORATION =====
-                            // Critical: Restore camera controls after loading
-                            // TacticalDesign may have disabled them during transition
-                            this.finalizeNavigationReady();
-
-                            hooks?.onLog?.('[POST_READY] input unlocked');
-                            hooks?.onProgress?.(1);
-                            hooks?.onReady?.();
-                        });
+                        // Camera transition complete, but don't unlock yet
+                        console.log('[READY] Camera transition complete');
                     });
                 },
                 onError: (err) => {
                     console.error('[NavigationScene] Loading failed', err);
                 },
             });
+
+            // ===== ENGINE_AWAKENED_BARRIER =====
+            // Wait for actual RAF/render loop to be confirmed active
+            // This ensures "rendering is actually happening" before showing UI
+            if (result.phase === LoadingPhase.READY) {
+                console.log('[ENGINE_AWAKENED] Waiting for render loop confirmation...');
+                hooks?.onLog?.('[ENGINE_AWAKENED] Verifying render loop...');
+
+                const awakenedResult = await waitForEngineAwakened(this.scene, {
+                    minConsecutiveFrames: 3,
+                    maxWaitMs: 3000,
+                    debug: true,
+                });
+
+                if (awakenedResult.passed) {
+                    // UX_READY: Safe to show content to user
+                    console.log('[UX_READY] Engine awakened, finalizing...');
+                    hooks?.onLog?.('[UX_READY] View stabilized');
+
+                    // Now safe to unlock input and finalize
+                    this.inputLocked = false;
+                    this.finalizeNavigationReady();
+
+                    hooks?.onLog?.('[UX_READY] Input unlocked');
+                    hooks?.onProgress?.(1);
+                    hooks?.onReady?.();
+                } else {
+                    // Timeout - proceed anyway but log warning
+                    console.warn('[UX_READY] Engine awakened timeout, proceeding anyway');
+                    hooks?.onLog?.('[UX_READY] Warning: Engine awakened timeout');
+
+                    this.inputLocked = false;
+                    this.finalizeNavigationReady();
+
+                    hooks?.onProgress?.(1);
+                    hooks?.onReady?.();
+                }
+            }
 
             dbg?.end('LOADING');
 
