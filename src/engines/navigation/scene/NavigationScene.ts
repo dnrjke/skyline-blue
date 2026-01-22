@@ -341,6 +341,12 @@ export class NavigationScene {
                         this.scene.onAfterRenderObservable.addOnce(() => {
                             this.inputLocked = false;
                             console.log('[POST_READY] Input unlocked');
+
+                            // ===== POST_READY CAMERA RESTORATION =====
+                            // Critical: Restore camera controls after loading
+                            // TacticalDesign may have disabled them during transition
+                            this.finalizeNavigationReady();
+
                             hooks?.onLog?.('[POST_READY] input unlocked');
                             hooks?.onProgress?.(1);
                             hooks?.onReady?.();
@@ -373,6 +379,54 @@ export class NavigationScene {
         this.currentPhase = phase;
         console.log(`[NavigationScene] Phase: ${phase}`);
         hooks?.onLog?.(`--- Phase: ${phase} ---`);
+    }
+
+    /**
+     * POST_READY Camera Restoration Protocol
+     *
+     * This method MUST be called after READY phase completes.
+     * It ensures camera controls are properly restored after loading transition.
+     *
+     * Why this is critical:
+     * - TacticalDesign may disable camera controls during design phase
+     * - Engine resize may not trigger camera projection update
+     * - Camera attach/detach lifecycle can cause "invisible but rendered" illusion
+     *
+     * @see src/agents/navigation-loading/AGENT.md
+     */
+    private finalizeNavigationReady(): void {
+        const engine = this.scene.getEngine();
+        const canvas = engine.getRenderingCanvas();
+        const camera = this.navigationCamera;
+
+        // 1. Force engine resize to update projection matrix
+        engine.resize();
+
+        // 2. Ensure camera controls are attached
+        if (camera && canvas && !camera.isDisposed()) {
+            // Re-attach controls (safe to call even if already attached)
+            camera.attachControl(canvas, true);
+        }
+
+        // 3. Enable camera controller if it was disabled
+        if (this.cameraController) {
+            // CameraController may have enable/disable methods
+            // This ensures it's in active state
+            (this.cameraController as any).enable?.();
+        }
+
+        // 4. Force a render to apply changes
+        this.scene.render();
+
+        // 5. Log camera state for debugging
+        console.info('[POST_READY] Camera controls restored', {
+            cameraAttached: !!(camera?.inputs as any)?.attached,
+            cameraPosition: camera?.position?.toString() ?? 'null',
+            cameraTarget: camera?.target?.toString() ?? 'null',
+            cameraRadius: camera?.radius ?? 0,
+            engineWidth: engine.getRenderWidth(),
+            engineHeight: engine.getRenderHeight(),
+        });
     }
 
     private disposeEnvironment(): void {
@@ -622,7 +676,33 @@ export class NavigationScene {
         // Reset camera to tactical view
         this.resetToTacticalCamera();
 
+        // Restore camera controls (Flight may have detached them)
+        this.restoreTacticalCameraControls();
+
         console.log('[NavigationScene] Returned to design phase');
+    }
+
+    /**
+     * Restore tactical camera controls after flight
+     * Similar to finalizeNavigationReady but specifically for post-flight
+     */
+    private restoreTacticalCameraControls(): void {
+        const engine = this.scene.getEngine();
+        const canvas = engine.getRenderingCanvas();
+        const camera = this.navigationCamera;
+
+        if (!camera || camera.isDisposed() || !canvas) return;
+
+        // Ensure this camera is active
+        this.scene.activeCamera = camera;
+
+        // Re-attach controls
+        camera.attachControl(canvas, true);
+
+        // Force resize
+        engine.resize();
+
+        console.info('[POST_FLIGHT] Tactical camera controls restored');
     }
 
     /**
