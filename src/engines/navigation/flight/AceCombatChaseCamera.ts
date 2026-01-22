@@ -7,6 +7,12 @@
  * - Speed-driven FOV (radians)
  * - 2.5D visual protection (±15° Y-axis constraint)
  *
+ * CAMERA ALIGNMENT RULES (Requirement 8):
+ * - Camera tracks character's FORWARD + ORIENTATION (not just position)
+ * - Camera position = character.position - forward * distance + up * height
+ * - Camera setTarget = character.position (look at character)
+ * - At START, camera SNAPS to aligned position (no lerp)
+ *
  * ❌ FORBIDDEN:
  * - ArcRotateCamera during flight
  * - Direct mesh parenting with full rotation inheritance
@@ -188,6 +194,29 @@ export class AceCombatChaseCamera {
     }
 
     /**
+     * Force camera to snap to target position immediately (no damping)
+     * Used for deterministic initialization at START (Requirement 8)
+     *
+     * This ensures:
+     * - Camera position is aligned with character's forward direction
+     * - No lerp/damping on first frame
+     * - Curvature samples reset (no stale banking)
+     * - Roll reset to zero
+     */
+    forceSnapToTarget(): void {
+        // Reset all state that could cause initial jitter
+        this.curvatureSamples = [];
+        this.currentRoll = 0;
+        this.currentFov = this.config.baseFov;
+
+        if (this.targetNode) {
+            this.lastPosition = this.targetNode.position.clone();
+        }
+
+        this.updateCameraImmediate();
+    }
+
+    /**
      * Dispose resources
      */
     dispose(): void {
@@ -346,14 +375,21 @@ export class AceCombatChaseCamera {
 
     /**
      * Calculate camera position and look-at point
-     * Enforces 2.5D visual protection
+     *
+     * CAMERA ALIGNMENT (Requirement 8):
+     * - Uses character's FORWARD direction (from rotationQuaternion)
+     * - Position = character - forward * distance + up * height
+     * - LookAt = character position
+     *
+     * Enforces 2.5D visual protection (±15° Y-axis constraint)
      */
     private calculateCameraTransform(): void {
         if (!this.targetNode) return;
 
         const targetPos = this.targetNode.position;
 
-        // Get character forward direction
+        // Get character forward direction (from rotationQuaternion, NOT lookAt)
+        // This respects the MODEL_NEEDS_FLIP correction applied in FlightController
         let charForward = this.targetNode.forward.clone();
 
         // ===== 2.5D VISUAL PROTECTION =====
