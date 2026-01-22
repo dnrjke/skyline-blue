@@ -188,6 +188,14 @@ export class AceCombatChaseCamera {
     }
 
     /**
+     * Force camera to snap to target position immediately (no damping)
+     * Used for deterministic initialization at START
+     */
+    forceSnapToTarget(): void {
+        this.updateCameraImmediate();
+    }
+
+    /**
      * Dispose resources
      */
     dispose(): void {

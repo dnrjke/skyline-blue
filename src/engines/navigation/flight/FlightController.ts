@@ -1,23 +1,37 @@
 /**
- * FlightController - Phase 3 Ace Combat Style Flight System
+ * FlightController - Flight Integrity & Orientation System
  *
  * Core Principles:
- * - Pure Path3D interpolation (NO Dijkstra)
- * - Ace Combat-like chase camera experience
- * - Banking based on path curvature
- * - Speed-driven FOV for immersion
- * - 2.5D visual protection (±15° Y-axis constraint)
+ * - Deterministic completion: START at any point yields identical results
+ * - Visual integrity: Character-Path-Camera alignment never breaks
+ * - Pure Path3D interpolation (NO Dijkstra/Legacy)
+ *
+ * Invariants:
+ * - START is completely deterministic
+ * - Flight completes exactly once: Node[0] → Node[N]
+ * - Path, Character, Camera share the same directional frame
+ * - Legacy systems are NEVER called
  *
  * ❌ ABSOLUTELY FORBIDDEN:
- * - Any pathfinding algorithm
- * - Any automatic route adjustment
- * - ArcRotateCamera during flight
- * - Banking based on input direction
- * - Any Legacy system reference
+ * - Legacy Path/Dijkstra calls
+ * - Lerp initialization at START (breaks determinism)
+ * - activeMeshes-based validation
+ * - Implicit forward axis handling
+ * - Path progression without completion logic
  */
 
 import * as BABYLON from '@babylonjs/core';
 import { AceCombatChaseCamera } from './AceCombatChaseCamera';
+
+// ========== CONSTANTS ==========
+
+/** Completion epsilon to prevent floating-point errors */
+const COMPLETION_EPSILON = 0.001;
+
+/** Minimum nodes required for flight */
+const MIN_NODES_REQUIRED = 2;
+
+// ========== INTERFACES ==========
 
 export interface FlightControllerConfig {
     /** Base flight speed (units per second) */
@@ -34,6 +48,16 @@ export interface FlightControllerConfig {
     maxBankAngle?: number;
     /** Bank smoothing factor */
     bankSmoothing?: number;
+    /** Bank recovery speed when returning to straight flight */
+    bankRecoverySpeed?: number;
+    /** Look-ahead factor for smooth heading on curves */
+    lookAheadFactor?: number;
+    /** Camera follow distance */
+    cameraFollowDistance?: number;
+    /** Camera height offset */
+    cameraHeight?: number;
+    /** Camera damping factor */
+    cameraDamping?: number;
 }
 
 export interface FlightResult {
@@ -59,7 +83,7 @@ export interface FlightControllerCallbacks {
 }
 
 /**
- * Curvature sample for banking calculation
+ * Tangent sample for curvature-based banking
  */
 interface TangentSample {
     tangent: BABYLON.Vector3;
@@ -67,10 +91,10 @@ interface TangentSample {
 }
 
 /**
- * FlightController - Ace Combat style flight execution
+ * FlightController - Deterministic, Visual-First Flight System
  *
  * Design Philosophy:
- * "Fate is chosen, not computed. The flight follows the chosen path with style."
+ * "Flight quality is measured by visual consistency, not technical metrics."
  */
 export class FlightController {
     private scene: BABYLON.Scene;
@@ -112,21 +136,26 @@ export class FlightController {
             acceleration: config.acceleration ?? 2,
             rotationSmoothing: config.rotationSmoothing ?? 0.08,
             bankingIntensity: config.bankingIntensity ?? 1.5,
-            maxBankAngle: config.maxBankAngle ?? 0.5, // ~29°
+            maxBankAngle: config.maxBankAngle ?? 0.5,
             bankSmoothing: config.bankSmoothing ?? 0.05,
+            bankRecoverySpeed: config.bankRecoverySpeed ?? 0.03,
+            lookAheadFactor: config.lookAheadFactor ?? 0.15,
+            cameraFollowDistance: config.cameraFollowDistance ?? 6,
+            cameraHeight: config.cameraHeight ?? 2.5,
+            cameraDamping: config.cameraDamping ?? 0.06,
         };
 
         // Create chase camera
         this.chaseCamera = new AceCombatChaseCamera(scene, {
-            offset: new BABYLON.Vector3(0, 2.5, -6),
+            offset: new BABYLON.Vector3(0, this.config.cameraHeight, -this.config.cameraFollowDistance),
             lookAheadDistance: 4,
             baseFov: 0.8,
             maxFov: 1.15,
             fovLerpSpeed: 0.04,
             rollDamping: 0.025,
             maxCameraRoll: 0.25,
-            positionSmoothing: 0.06,
-            maxYAxisDeviation: 0.26, // ~15°
+            positionSmoothing: this.config.cameraDamping,
+            maxYAxisDeviation: 0.26,
         });
     }
 
@@ -139,9 +168,21 @@ export class FlightController {
 
     /**
      * Initialize flight with character and path
+     *
+     * DETERMINISTIC INITIALIZATION:
+     * - Validates node count (minimum 2)
+     * - Snaps character to Node[0]
+     * - Forces rotation to Node[0] → Node[1] direction
+     * - NO lerp, NO interpolation at init
      */
     initialize(character: BABYLON.AbstractMesh, path: BABYLON.Path3D): void {
         if (this.disposed) return;
+
+        // ===== NODE VALIDATION (1-1) =====
+        const points = path.getPoints();
+        if (points.length < MIN_NODES_REQUIRED) {
+            throw new Error(`Flight requires at least ${MIN_NODES_REQUIRED} nodes, got ${points.length}`);
+        }
 
         this.character = character;
         this.path3D = path;
@@ -150,31 +191,43 @@ export class FlightController {
         this.currentBankAngle = 0;
         this.tangentSamples = [];
 
-        // Calculate total path length for speed-based timing
+        // Calculate total path length
         this.totalPathLength = this.calculatePathLength(path);
 
-        // Position character at start
-        const startPos = path.getPointAt(0);
+        // ===== CHARACTER RESET - SNAP (1-2) =====
+        const startPos = points[0];
+        const nextPos = points[1];
+
+        // SNAP position (no interpolation)
         character.position.copyFrom(startPos);
+
+        // ===== FORWARD AXIS & ROTATION (1-3) =====
+        // Calculate initial direction: Node[0] → Node[1]
+        const initialDirection = nextPos.subtract(startPos).normalize();
 
         // Ensure rotationQuaternion is initialized
         if (!character.rotationQuaternion) {
             character.rotationQuaternion = BABYLON.Quaternion.Identity();
         }
 
-        // Orient character along path
-        const startTangent = path.getTangentAt(0);
-        this.orientCharacterImmediate(startTangent);
+        // SNAP rotation (no interpolation) - using explicit forward axis
+        character.rotationQuaternion = BABYLON.Quaternion.FromLookDirectionLH(
+            initialDirection,
+            BABYLON.Vector3.Up()
+        );
 
         // Set camera speed range
         this.chaseCamera?.setSpeedRange(this.config.baseSpeed, this.config.maxSpeed);
 
-        console.log(`[FlightController] Initialized: path length = ${this.totalPathLength.toFixed(2)}, base speed = ${this.config.baseSpeed}`);
+        console.log(`[FlightController] Initialized: path=${this.totalPathLength.toFixed(2)}, nodes=${points.length}`);
     }
 
     /**
      * Start flight execution
-     * Returns promise that resolves when flight completes or aborts
+     *
+     * DETERMINISTIC START:
+     * - Camera snaps to initial position (no lerp)
+     * - All state is reset before flight loop begins
      */
     startFlight(): Promise<FlightResult> {
         return new Promise((resolve) => {
@@ -193,22 +246,26 @@ export class FlightController {
             this.aborted = false;
             this.currentT = 0;
             this.currentSpeed = this.config.baseSpeed;
+            this.currentBankAngle = 0;
+            this.tangentSamples = [];
             this.startTime = performance.now();
 
-            // Activate chase camera
+            // ===== CAMERA INITIALIZATION - SNAP (1-4) =====
             if (this.chaseCamera && this.character) {
-                // Create a TransformNode for camera to follow
                 const followNode = this.character as unknown as BABYLON.TransformNode;
                 this.chaseCamera.activate(followNode, this.path3D);
+
+                // Force initial camera snap (no damping for first frame)
+                this.chaseCamera.forceSnapToTarget();
             }
 
-            // Start flight animation
+            // Start flight animation loop
             this.flightObserver = this.scene.onBeforeRenderObservable.add(() => {
                 this.updateFlight();
             });
 
             this.callbacks.onStart?.();
-            console.log('[FlightController] Flight started (Ace Combat mode)');
+            console.log('[FlightController] Flight started (Deterministic Mode)');
         });
     }
 
@@ -238,7 +295,6 @@ export class FlightController {
      */
     abort(): void {
         if (!this.isFlying) return;
-
         this.aborted = true;
         this.completeFlight();
     }
@@ -276,24 +332,25 @@ export class FlightController {
         // Update progress
         this.currentT = Math.min(this.currentT + tDelta, 1);
 
-        // Get position and tangent at current t
+        // ===== PATH FOLLOWING (2-1, 2-2) =====
         const position = this.path3D.getPointAt(this.currentT);
-        const tangent = this.path3D.getTangentAt(this.currentT);
+        const tangent = this.path3D.getTangentAt(this.currentT).normalize();
 
         // Move character
         this.character.position.copyFrom(position);
 
-        // Calculate banking from path curvature
-        const banking = this.calculateBanking(tangent);
+        // ===== BANKING CALCULATION (4) =====
+        const curvature = this.calculateCurvature(tangent);
+        const targetBank = this.calculateTargetBank(curvature);
 
-        // Orient character with banking
-        this.orientCharacterWithBanking(tangent, banking, deltaTime);
+        // ===== FORWARD ALIGNMENT WITH LOOK-AHEAD (2-2, 2-3) =====
+        this.updateCharacterOrientation(tangent, targetBank, deltaTime);
 
         // Notify progress
         this.callbacks.onProgress?.(this.currentT);
 
-        // Check completion
-        if (this.currentT >= 1) {
+        // ===== COMPLETION CHECK (5-1) =====
+        if (this.currentT >= 1.0 - COMPLETION_EPSILON) {
             this.completeFlight();
         }
     }
@@ -302,95 +359,111 @@ export class FlightController {
      * Update speed with acceleration
      */
     private updateSpeed(deltaTime: number): void {
-        // Accelerate towards max speed
         const targetSpeed = this.config.maxSpeed;
         this.currentSpeed = BABYLON.Scalar.Lerp(
             this.currentSpeed,
             targetSpeed,
             this.config.acceleration * deltaTime
         );
-
         this.callbacks.onSpeedChange?.(this.currentSpeed);
     }
 
     /**
-     * Calculate banking based on path curvature
-     * Uses smoothed tangent delta over multiple samples
+     * Calculate curvature from tangent samples
      */
-    private calculateBanking(currentTangent: BABYLON.Vector3): number {
-        // Add current sample
+    private calculateCurvature(currentTangent: BABYLON.Vector3): number {
         this.tangentSamples.push({
             tangent: currentTangent.clone(),
             t: this.currentT,
         });
 
-        // Keep only recent samples
         while (this.tangentSamples.length > this.TANGENT_SAMPLE_COUNT) {
             this.tangentSamples.shift();
         }
 
         if (this.tangentSamples.length < 2) return 0;
 
-        // Calculate average curvature from tangent changes
         let totalCurvature = 0;
         let sampleCount = 0;
 
         for (let i = 1; i < this.tangentSamples.length; i++) {
             const prev = this.tangentSamples[i - 1].tangent;
             const curr = this.tangentSamples[i].tangent;
-
-            // Cross product Y component indicates turn direction
-            // Positive Y = turning left, Negative Y = turning right
             const cross = BABYLON.Vector3.Cross(prev, curr);
             totalCurvature += cross.y;
             sampleCount++;
         }
 
-        if (sampleCount === 0) return 0;
-
-        const avgCurvature = totalCurvature / sampleCount;
-
-        // Scale curvature to banking angle
-        // Left turn (positive curvature) = bank left (positive angle)
-        // Right turn (negative curvature) = bank right (negative angle)
-        return avgCurvature * this.config.bankingIntensity * 10;
+        return sampleCount > 0 ? totalCurvature / sampleCount : 0;
     }
 
     /**
-     * Orient character with banking applied
+     * Calculate target bank angle with recovery logic
+     * On straight sections, gradually returns to zero
      */
-    private orientCharacterWithBanking(
-        tangent: BABYLON.Vector3,
-        targetBanking: number,
-        deltaTime: number
-    ): void {
-        if (!this.character) return;
+    private calculateTargetBank(curvature: number): number {
+        // Scale curvature to banking angle
+        const rawBank = curvature * this.config.bankingIntensity * 10;
 
-        // Clamp target banking
-        const clampedBanking = Math.max(
+        // Clamp to max bank angle
+        const clampedBank = Math.max(
             -this.config.maxBankAngle,
-            Math.min(this.config.maxBankAngle, targetBanking)
+            Math.min(this.config.maxBankAngle, rawBank)
         );
 
-        // Smooth banking transition
+        // ===== BANKING RECOVERY (4) =====
+        // If curvature is low (straight section), recover towards zero
+        const curvatureThreshold = 0.01;
+        if (Math.abs(curvature) < curvatureThreshold) {
+            // Gradual recovery to zero - NO instant snap
+            return BABYLON.Scalar.Lerp(this.currentBankAngle, 0, this.config.bankRecoverySpeed);
+        }
+
+        return clampedBank;
+    }
+
+    /**
+     * Update character orientation with look-ahead and banking
+     */
+    private updateCharacterOrientation(
+        tangent: BABYLON.Vector3,
+        targetBank: number,
+        deltaTime: number
+    ): void {
+        if (!this.character || !this.path3D) return;
+
+        // ===== LOOK-AHEAD FOR SMOOTH HEADING (2-3) =====
+        // On curves, predict heading direction slightly ahead
+        const lookAheadT = Math.min(this.currentT + 0.02, 1.0);
+        const lookAheadTangent = this.path3D.getTangentAt(lookAheadT).normalize();
+
+        // Blend current tangent with look-ahead for smooth transitions
+        const blendedTangent = BABYLON.Vector3.Lerp(
+            tangent,
+            lookAheadTangent,
+            this.config.lookAheadFactor
+        ).normalize();
+
+        // Calculate base rotation from blended tangent
+        const baseRotation = BABYLON.Quaternion.FromLookDirectionLH(
+            blendedTangent,
+            BABYLON.Vector3.Up()
+        );
+
+        // ===== SMOOTH BANKING TRANSITION =====
+        // Smooth banking - never instant snap
         this.currentBankAngle = BABYLON.Scalar.Lerp(
             this.currentBankAngle,
-            clampedBanking,
+            targetBank,
             this.config.bankSmoothing + deltaTime * 2
         );
 
-        // Calculate base rotation from tangent
-        const forward = tangent.normalize();
-        const baseRotation = BABYLON.Quaternion.FromLookDirectionLH(forward, BABYLON.Vector3.Up());
-
         // Apply banking (roll around forward axis)
-        const bankRotation = BABYLON.Quaternion.RotationAxis(forward, this.currentBankAngle);
+        const bankRotation = BABYLON.Quaternion.RotationAxis(blendedTangent, this.currentBankAngle);
         const finalRotation = baseRotation.multiply(bankRotation);
 
-        // Get current rotation
+        // ===== SMOOTH ROTATION INTERPOLATION =====
         const currentRotation = this.character.rotationQuaternion ?? BABYLON.Quaternion.Identity();
-
-        // Smooth interpolation
         const smoothedRotation = BABYLON.Quaternion.Slerp(
             currentRotation,
             finalRotation,
@@ -401,23 +474,16 @@ export class FlightController {
     }
 
     /**
-     * Immediate character orientation (no smoothing)
-     */
-    private orientCharacterImmediate(tangent: BABYLON.Vector3): void {
-        if (!this.character) return;
-
-        const forward = tangent.normalize();
-        this.character.rotationQuaternion = BABYLON.Quaternion.FromLookDirectionLH(
-            forward,
-            BABYLON.Vector3.Up()
-        );
-    }
-
-    /**
      * Complete flight and cleanup
+     *
+     * COMPLETION SEQUENCE (5-2):
+     * 1. Deactivate FlightController
+     * 2. Lock character/camera final state
+     * 3. Emit MissionResult event
+     * 4. Enable return to Design Phase
      */
     private completeFlight(): void {
-        // Stop animation
+        // Stop animation loop
         if (this.flightObserver) {
             this.scene.onBeforeRenderObservable.remove(this.flightObserver);
             this.flightObserver = null;
@@ -429,18 +495,18 @@ export class FlightController {
         const finalPosition = this.character?.position.clone() ?? BABYLON.Vector3.Zero();
 
         const result: FlightResult = {
-            completed: !this.aborted && this.currentT >= 1,
+            completed: !this.aborted && this.currentT >= 1.0 - COMPLETION_EPSILON,
             totalTimeMs,
             finalPosition,
             aborted: this.aborted,
         };
 
-        console.log(`[FlightController] Flight ${result.completed ? 'completed' : 'aborted'} in ${Math.round(totalTimeMs)}ms`);
+        console.log(`[FlightController] Flight ${result.completed ? 'COMPLETED' : 'ABORTED'} in ${Math.round(totalTimeMs)}ms (t=${this.currentT.toFixed(4)})`);
 
         // Deactivate chase camera
         this.chaseCamera?.deactivate();
 
-        // Reset banking
+        // Reset banking state
         this.currentBankAngle = 0;
         this.tangentSamples = [];
 
