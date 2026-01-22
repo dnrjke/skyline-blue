@@ -41,6 +41,9 @@ import {
 // Phase 3: Character Loading
 import { CharacterLoadUnit, type FlightAnimationRole } from '../loading/CharacterLoadUnit';
 
+// Debug: Render Desync Investigation
+import { RenderDesyncProbe, markVisualReadyTimestamp } from '../debug/RenderDesyncProbe';
+
 export interface NavigationSceneConfig {
     /** @deprecated Energy budget is no longer used in Phase 3 */
     energyBudget?: number;
@@ -93,6 +96,9 @@ export class NavigationScene {
     private previousCamera: BABYLON.Camera | null = null;
     private navigationCamera: BABYLON.ArcRotateCamera | null = null;
 
+    // Debug: Render Desync Probe
+    private renderDesyncProbe: RenderDesyncProbe | null = null;
+
     private currentStage = { episode: 1, stage: 1 } as const;
     private startHooks: NavigationStartHooks | null = null;
     private config: NavigationSceneConfig;
@@ -140,6 +146,9 @@ export class NavigationScene {
             onAdjustCamera: (preset) => this.debugSetCameraPreset(preset),
             onStopAnimation: () => this.debugStopAnimation(),
         });
+
+        // Debug: Create Render Desync Probe
+        this.renderDesyncProbe = new RenderDesyncProbe(scene);
     }
 
     private setupTacticalCallbacks(): void {
@@ -260,6 +269,11 @@ export class NavigationScene {
                 onStateChange: (state) => {
                     this.currentPhase = state.phase;
                     hooks?.onProgress?.(state.progress);
+
+                    // Debug: Mark VISUAL_READY timestamp for probe
+                    if (state.phase === LoadingPhase.VISUAL_READY) {
+                        markVisualReadyTimestamp();
+                    }
                 },
                 onUnitStart: (unitId, displayName) => {
                     hooks?.onLog?.(`Loading: ${displayName ?? unitId}...`);
@@ -336,6 +350,9 @@ export class NavigationScene {
                 onReady: () => {
                     console.log('[READY] Loading complete, starting camera transition');
                     hooks?.onLog?.('[READY] reached');
+
+                    // ===== DEBUG: Start Render Desync Probe =====
+                    this.renderDesyncProbe?.startProbe();
 
                     this.cameraController.transitionIn(LAYOUT.HOLOGRAM.GRID_SIZE / 2, () => {
                         this.scene.onAfterRenderObservable.addOnce(() => {
@@ -452,6 +469,9 @@ export class NavigationScene {
         this.scanLine.dispose();
         this.hologram.dispose();
         this.disposeEnvironment();
+
+        // Debug: Dispose probe
+        this.renderDesyncProbe?.dispose();
 
         if (this.characterLoadUnit) {
             this.characterLoadUnit.dispose();
