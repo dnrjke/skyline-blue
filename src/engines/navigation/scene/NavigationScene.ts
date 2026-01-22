@@ -127,6 +127,7 @@ export class NavigationScene {
             onRedo: () => this.handleRedo(),
             onConfirm: () => this.confirmAndLaunch(),
             onSetMode: (mode) => this.setInputMode(mode),
+            onToggleDebug: () => this.toggleDebugPanel(),
         });
 
         // Create Animation Debug Panel
@@ -808,12 +809,13 @@ class TacticalHUD {
             onRedo: () => void;
             onConfirm: () => void;
             onSetMode: (mode: TacticalInputMode) => void;
+            onToggleDebug: () => void;
         }
     ) {
         // Main container
         this.container = new GUI.Rectangle('TacticalHUD');
         this.container.width = '340px';
-        this.container.height = '220px';
+        this.container.height = '260px'; // Increased for debug button
         this.container.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
         this.container.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
         this.container.top = '20px';
@@ -906,6 +908,15 @@ class TacticalHUD {
         this.confirmButton.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
         this.confirmButton.onPointerClickObservable.add(() => callbacks.onConfirm());
         this.container.addControl(this.confirmButton);
+
+        // === DEBUG TOGGLE BUTTON ===
+        const debugButton = this.createActionButton('🔧 DEBUG', 'rgba(255, 150, 50, 0.8)', 80);
+        debugButton.height = '32px';
+        debugButton.fontSize = 11;
+        debugButton.top = '228px';
+        debugButton.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        debugButton.onPointerClickObservable.add(() => callbacks.onToggleDebug());
+        this.container.addControl(debugButton);
     }
 
     private createModeButton(text: string, bgColor: string): GUI.Button {
