@@ -190,7 +190,9 @@ export class NavigationScene {
         cam.layerMask = 0x0FFFFFFF;
         (cam as any).includeOnlyWithLayerMask = 0;
 
-        cam.attachControl(this.scene.getEngine().getRenderingCanvas(), true);
+        // NOTE: attachControl is deliberately NOT called here.
+        // Camera controls are enabled only AFTER ENGINE_AWAKENED barrier passes.
+        // This prevents user input during loading phase.
 
         this.scene.activeCamera = cam;
         this.navigationCamera = cam;
@@ -349,70 +351,78 @@ export class NavigationScene {
             const result = await this.orchestrator.execute({
                 onLog: hooks?.onLog,
                 onReady: () => {
-                    // READY = Logical loading complete (NOT UX ready)
-                    console.log('[READY] Logical loading complete, waiting for engine awakening...');
-                    hooks?.onLog?.('[READY] reached - stabilizing view...');
+                    // VISUAL_READY/STABILIZING complete — orchestrator logical load done.
+                    // ⚠️ This is NOT our READY. ENGINE_AWAKENED barrier comes next.
+                    console.log('[ORCHESTRATOR_DONE] Logical loading complete, entering ENGINE_AWAKENED gate...');
+                    hooks?.onLog?.('[ORCHESTRATOR_DONE] Assets loaded, verifying render loop...');
 
                     // ===== DEBUG: Start Render Desync Probe =====
                     this.renderDesyncProbe?.startProbe();
 
-                    // Start camera transition (visual only)
-                    this.cameraController.transitionIn(LAYOUT.HOLOGRAM.GRID_SIZE / 2, () => {
-                        // Camera transition complete, but don't unlock yet
-                        console.log('[READY] Camera transition complete');
-                    });
+                    // ⚠️ FORBIDDEN before ENGINE_AWAKENED:
+                    // - camera transition
+                    // - camera.attachControl
+                    // - navigation update loop
+                    // - input unlock
                 },
                 onError: (err) => {
                     console.error('[NavigationScene] Loading failed', err);
                 },
             });
 
+            if (result.phase === LoadingPhase.FAILED) {
+                throw result.error ?? new Error('Loading failed');
+            }
+
             // ===== ENGINE_AWAKENED_BARRIER =====
-            // Wait for actual RAF/render loop to be confirmed active
-            // This ensures "rendering is actually happening" before showing UI
+            // PREREQUISITE for READY — must pass before any UX action.
+            // Flow: VISUAL_READY → ENGINE_AWAKENED → READY → UX_READY
             if (result.phase === LoadingPhase.READY) {
-                console.log('[ENGINE_AWAKENED] Waiting for render loop confirmation...');
-                hooks?.onLog?.('[ENGINE_AWAKENED] Verifying render loop...');
+                console.log('[ENGINE_AWAKENED] Waiting for stable render loop...');
+                hooks?.onLog?.('[ENGINE_AWAKENED] Verifying render loop stability...');
 
                 const awakenedResult = await waitForEngineAwakened(this.scene, {
                     minConsecutiveFrames: 3,
+                    maxAllowedFrameGapMs: 50,
                     maxWaitMs: 3000,
                     debug: true,
                 });
 
-                if (awakenedResult.passed) {
-                    // UX_READY: Safe to show content to user
-                    console.log('[UX_READY] Engine awakened, finalizing...');
-                    hooks?.onLog?.('[UX_READY] View stabilized');
-
-                    // Now safe to unlock input and finalize
-                    this.inputLocked = false;
-                    this.finalizeNavigationReady();
-
-                    hooks?.onLog?.('[UX_READY] Input unlocked');
-                    hooks?.onProgress?.(1);
-                    hooks?.onReady?.();
-                } else {
-                    // Timeout - proceed anyway but log warning
-                    console.warn('[UX_READY] Engine awakened timeout, proceeding anyway');
-                    hooks?.onLog?.('[UX_READY] Warning: Engine awakened timeout');
-
-                    this.inputLocked = false;
-                    this.finalizeNavigationReady();
-
-                    hooks?.onProgress?.(1);
-                    hooks?.onReady?.();
+                if (!awakenedResult.passed) {
+                    console.warn('[ENGINE_AWAKENED] Barrier timeout — proceeding with degraded confidence');
+                    hooks?.onLog?.('[ENGINE_AWAKENED] Warning: barrier timeout');
                 }
+
+                // ===== READY =====
+                // Engine is confirmed awake. Now safe to start visual transitions.
+                console.log('[READY] Engine awakened confirmed. Starting camera transition...');
+                hooks?.onLog?.('[READY] View stabilized — camera transition starting');
+
+                // Camera transition starts at READY (not before)
+                this.cameraController.transitionIn(LAYOUT.HOLOGRAM.GRID_SIZE / 2, () => {
+                    console.log('[READY] Camera transition complete');
+                });
+
+                // ===== UX_READY (1 frame after READY) =====
+                // Wait exactly 1 frame before unlocking input.
+                // This ensures the first READY-frame render is committed to screen.
+                await this.waitOneFrame();
+
+                console.log('[UX_READY] Input unlock + controls attach');
+                hooks?.onLog?.('[UX_READY] Input unlocked');
+
+                // Now safe: attach camera controls, unlock input, finalize
+                this.inputLocked = false;
+                this.finalizeNavigationReady();
+
+                hooks?.onProgress?.(1);
+                hooks?.onReady?.();
             }
 
             dbg?.end('LOADING');
 
             const totalMs = performance.now() - startTime;
-            hooks?.onLog?.(`[READY] Total loading time: ${Math.round(totalMs)}ms`);
-
-            if (result.phase === LoadingPhase.FAILED) {
-                throw result.error ?? new Error('Loading failed');
-            }
+            hooks?.onLog?.(`[COMPLETE] Total loading time: ${Math.round(totalMs)}ms`);
 
         } catch (err) {
             this.setPhase(LoadingPhase.FAILED, hooks);
@@ -473,6 +483,26 @@ export class NavigationScene {
             cameraRadius: camera?.radius ?? 0,
             engineWidth: engine.getRenderWidth(),
             engineHeight: engine.getRenderHeight(),
+        });
+    }
+
+    /**
+     * Wait exactly 1 render frame.
+     * Used for UX_READY delay: ensures READY-frame is committed to screen
+     * before unlocking input.
+     */
+    private waitOneFrame(): Promise<void> {
+        return new Promise((resolve) => {
+            const observer = this.scene.onAfterRenderObservable.addOnce(() => {
+                resolve();
+            });
+            // Fallback if scene stops rendering
+            setTimeout(() => {
+                if (observer) {
+                    this.scene.onAfterRenderObservable.remove(observer);
+                }
+                resolve();
+            }, 100);
         });
     }
 
