@@ -11,10 +11,17 @@
  *
  * SOLUTION:
  * ENGINE_AWAKENED_BARRIER is a HARD GATE that:
- * 1. Actively kicks RAF awake (engine.resize + requestAnimationFrame)
+ * 1. Actively kicks RAF awake via forced frame cycle
+ *    (engine.beginFrame + scene.render + engine.endFrame + RAF chain)
  * 2. Waits for actual onBeforeRender ticks (proves RAF is alive)
  * 3. Requires N consecutive stable frames (proves RAF is stable)
  * 4. HARD FAILS if no frames arrive (never auto-passes on timeout)
+ *
+ * FORBIDDEN kick mechanisms:
+ * - engine.resize() — masks the bug, doesn't fix it
+ * - DevTools / visibility API — external stimulus, not self-contained
+ * - camera manipulation / attachControl — UX side effect
+ * - User input events — not available during loading
  *
  * NEW FLOW (required):
  *   VISUAL_READY → ENGINE_AWAKENED → READY → UX_READY
@@ -91,7 +98,7 @@ export class EngineAwakenedBarrier {
      * Wait for render loop to be confirmed STABLY active.
      *
      * Strategy:
-     * 1. Kick RAF awake (engine.resize + requestAnimationFrame)
+     * 1. Kick RAF awake (forced frame cycle + RAF chain)
      * 2. Wait for first onBeforeRender (proves RAF is alive)
      * 3. Count consecutive stable frames (proves RAF is stable)
      * 4. HARD FAIL if no frames arrive within timeout
@@ -124,13 +131,22 @@ export class EngineAwakenedBarrier {
     /**
      * Phase 1: Actively kick the RAF/render loop awake.
      *
-     * Why: Babylon engine may have runRenderLoop registered but RAF not ticking.
-     * Browser RAF can be stalled on initial load, hidden tab, or heavy GC.
+     * WHY THIS EXISTS:
+     * Babylon's runRenderLoop registers a RAF callback, but the browser may
+     * not actually schedule it (initial load, heavy GC, background tab).
+     * Result: render loop is "registered" but RAF never fires.
+     * DevTools opening accidentally wakes RAF — masking the real bug.
      *
-     * Strategy:
-     * - Force engine.resize() (triggers buffer recalculation)
-     * - Call requestAnimationFrame directly (proves browser RAF is alive)
-     * - If no frame within kickIntervalMs, retry up to maxKickAttempts
+     * STRATEGY (no resize, no DevTools, no visibility API):
+     * 1. Check if render loop is already ticking naturally
+     * 2. If not, force a complete frame cycle:
+     *    engine.beginFrame() → scene.render() → engine.endFrame()
+     *    This mirrors exactly what Babylon's internal _renderLoop does.
+     * 3. Chain RAF callbacks with forced frames to prime the RAF scheduler
+     * 4. Verify natural render loop ticks follow
+     *
+     * FORBIDDEN: engine.resize(), camera manipulation, visibility API,
+     *            DevTools, user input events
      *
      * Returns: number of kicks required (0 if already awake)
      */
@@ -142,11 +158,11 @@ export class EngineAwakenedBarrier {
         for (let attempt = 0; attempt < this.config.maxKickAttempts; attempt++) {
             if (this.disposed) break;
 
-            // Check if RAF is already alive (frames being rendered)
+            // Check if RAF is already alive (natural render loop frames arriving)
             const framesBefore = await this.countFramesInWindow(16);
             if (framesBefore > 0) {
                 if (this.config.debug) {
-                    console.log(`[ENGINE_AWAKENED] RAF already alive (detected ${framesBefore} frames)`);
+                    console.log(`[ENGINE_AWAKENED] RAF already alive (detected ${framesBefore} natural frames)`);
                 }
                 rafAlive = true;
                 break;
@@ -158,27 +174,44 @@ export class EngineAwakenedBarrier {
                 console.log(`[ENGINE_AWAKENED] RAF kick attempt ${kickCount}/${this.config.maxKickAttempts}`);
             }
 
-            // Kick 1: Force engine resize (recalculates buffer, may trigger RAF)
-            engine.resize();
+            // === KICK STRATEGY: Forced Frame Cycle ===
+            // This mirrors Babylon's internal _renderLoop behavior:
+            //   engine.beginFrame() → scene.render() → engine.endFrame()
+            // Forcing this cycle primes the GPU pipeline and triggers observers,
+            // which can re-engage the RAF scheduler.
 
-            // Kick 2: Direct requestAnimationFrame to confirm browser RAF
-            await this.waitForRAF();
-
-            // Kick 3: Force a single scene render to prime the pipeline
             try {
+                // Step 1: Force a complete Babylon frame cycle (synchronous)
+                // beginFrame() prepares GPU timing, endFrame() presents the frame
+                engine.beginFrame();
                 this.scene.render();
-            } catch (e) {
-                // scene.render() may throw if scene isn't fully ready, ignore
+                engine.endFrame();
+
                 if (this.config.debug) {
-                    console.warn('[ENGINE_AWAKENED] scene.render() during kick threw:', e);
+                    console.log(`[ENGINE_AWAKENED] Kick ${kickCount}: forced frame cycle complete`);
+                }
+            } catch (e) {
+                // scene may not be fully ready — this is non-fatal
+                if (this.config.debug) {
+                    console.warn(`[ENGINE_AWAKENED] Kick ${kickCount}: forced frame threw:`, e);
                 }
             }
 
-            // Check if kick worked
+            // Step 2: Chain direct RAF callbacks with forced renders
+            // This re-enters the browser RAF scheduler, proving it's alive.
+            // Each RAF tick forces another frame, building momentum.
+            await this.rafChainWithRender(2);
+
+            // Step 3: Wait and check if natural render loop frames follow
+            // After our forced kicks, the engine's registered render loop
+            // should now be getting RAF callbacks naturally.
             const framesAfter = await this.countFramesInWindow(this.config.kickIntervalMs);
             if (framesAfter > 0) {
                 if (this.config.debug) {
-                    console.log(`[ENGINE_AWAKENED] RAF woke up after kick ${kickCount} (${framesAfter} frames)`);
+                    console.log(
+                        `[ENGINE_AWAKENED] RAF woke up after kick ${kickCount}: ` +
+                        `${framesAfter} frames in ${this.config.kickIntervalMs}ms window`
+                    );
                 }
                 rafAlive = true;
                 break;
@@ -198,12 +231,40 @@ export class EngineAwakenedBarrier {
     }
 
     /**
-     * Wait for a single requestAnimationFrame callback.
-     * This confirms the browser's RAF mechanism is alive.
+     * Chain N requestAnimationFrame callbacks, each forcing a frame render.
+     *
+     * Purpose: Prime the browser's RAF scheduler by executing actual work
+     * inside RAF callbacks. This teaches the browser that this tab needs
+     * rendering priority, re-engaging the render loop.
+     *
+     * Each RAF tick does: engine.beginFrame() → scene.render() → engine.endFrame()
+     * This is the minimum complete frame Babylon needs.
      */
-    private waitForRAF(): Promise<void> {
+    private rafChainWithRender(count: number): Promise<void> {
         return new Promise((resolve) => {
-            requestAnimationFrame(() => resolve());
+            let remaining = count;
+            const engine = this.scene.getEngine();
+
+            const tick = () => {
+                if (remaining <= 0 || this.disposed) {
+                    resolve();
+                    return;
+                }
+
+                remaining--;
+
+                try {
+                    engine.beginFrame();
+                    this.scene.render();
+                    engine.endFrame();
+                } catch {
+                    // Non-fatal: scene may still be initializing
+                }
+
+                requestAnimationFrame(tick);
+            };
+
+            requestAnimationFrame(tick);
         });
     }
 
