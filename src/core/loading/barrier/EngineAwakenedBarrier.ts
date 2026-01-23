@@ -44,7 +44,7 @@ import * as BABYLON from '@babylonjs/core';
 export interface EngineAwakenedConfig {
     /** Minimum consecutive STABLE natural frames required (default: 3) */
     minConsecutiveFrames?: number;
-    /** Maximum allowed frame gap in ms (default: 50) */
+    /** Maximum allowed frame gap in ms (default: 100) */
     maxAllowedFrameGapMs?: number;
     /** Maximum wait time in ms before HARD FAIL (default: 3000) */
     maxWaitMs?: number;
@@ -54,6 +54,13 @@ export interface EngineAwakenedConfig {
     burstFrameCount?: number;
     /** Maximum retry attempts if natural frames don't follow burst (default: 2) */
     maxBurstRetries?: number;
+    /**
+     * Graceful fallback timeout (ms) for Phase 2. (default: 500)
+     * If this time elapses AND at least 1 natural frame was observed,
+     * pass with a warning even without 3 consecutive stable frames.
+     * This prevents DevTools-dependent hangs.
+     */
+    gracefulFallbackMs?: number;
 }
 
 export interface EngineAwakenedResult {
@@ -92,11 +99,12 @@ export class EngineAwakenedBarrier {
         this.scene = scene;
         this.config = {
             minConsecutiveFrames: config.minConsecutiveFrames ?? 3,
-            maxAllowedFrameGapMs: config.maxAllowedFrameGapMs ?? 50,
+            maxAllowedFrameGapMs: config.maxAllowedFrameGapMs ?? 100,
             maxWaitMs: config.maxWaitMs ?? 3000,
             debug: config.debug ?? true,
             burstFrameCount: config.burstFrameCount ?? 5,
             maxBurstRetries: config.maxBurstRetries ?? 2,
+            gracefulFallbackMs: config.gracefulFallbackMs ?? 500,
         };
     }
 
@@ -260,20 +268,29 @@ export class EngineAwakenedBarrier {
             let stableFrameIntervals: number[] = [];
             let maxFrameInterval = 0;
             let observer: BABYLON.Nullable<BABYLON.Observer<BABYLON.Scene>> = null;
-            let timeoutId: ReturnType<typeof setTimeout> | null = null;
+            let hardTimeoutId: ReturnType<typeof setTimeout> | null = null;
+            let gracefulTimeoutId: ReturnType<typeof setTimeout> | null = null;
+            let resolved = false;
 
             const cleanup = () => {
                 if (observer) {
                     this.scene.onBeforeRenderObservable.remove(observer);
                     observer = null;
                 }
-                if (timeoutId) {
-                    clearTimeout(timeoutId);
-                    timeoutId = null;
+                if (hardTimeoutId) {
+                    clearTimeout(hardTimeoutId);
+                    hardTimeoutId = null;
+                }
+                if (gracefulTimeoutId) {
+                    clearTimeout(gracefulTimeoutId);
+                    gracefulTimeoutId = null;
                 }
             };
 
-            const complete = (passed: boolean, timedOut: boolean = false) => {
+            const complete = (passed: boolean, timedOut: boolean = false, graceful: boolean = false) => {
+                if (resolved) return;
+                resolved = true;
+
                 const elapsedMs = performance.now() - startTime;
                 cleanup();
 
@@ -298,13 +315,20 @@ export class EngineAwakenedBarrier {
                 };
 
                 if (this.config.debug) {
-                    if (passed) {
+                    if (passed && !graceful) {
                         console.log(
                             `[ENGINE_AWAKENED] ✓ PASSED: ` +
                             `${consecutiveStableFrames} stable natural frames, ` +
                             `avg dt=${avgFrameIntervalMs.toFixed(1)}ms, ` +
                             `first natural frame delay=${firstFrameDelayMs.toFixed(1)}ms, ` +
                             `bursts=${burstCount}, total elapsed=${elapsedMs.toFixed(1)}ms`
+                        );
+                    } else if (passed && graceful) {
+                        console.warn(
+                            `[ENGINE_AWAKENED] ⚠ GRACEFUL PASS: ` +
+                            `${totalFrameCount} natural frames observed (${consecutiveStableFrames} consecutive stable), ` +
+                            `fallback after ${this.config.gracefulFallbackMs}ms. ` +
+                            `DevTools-independent mode. elapsed=${elapsedMs.toFixed(1)}ms`
                         );
                     } else {
                         console.error(
@@ -320,19 +344,41 @@ export class EngineAwakenedBarrier {
                 resolve(result);
             };
 
-            // HARD timeout — FAIL if natural stable frames don't arrive
+            // HARD timeout — FAIL only if ZERO frames observed
             const remainingMs = Math.max(0, this.config.maxWaitMs - (performance.now() - startTime));
-            timeoutId = setTimeout(() => {
+            hardTimeoutId = setTimeout(() => {
                 if (consecutiveStableFrames >= this.config.minConsecutiveFrames) {
                     complete(true, false);
+                } else if (totalFrameCount > 0) {
+                    // Frames ARE rendering, just not stable enough — graceful pass
+                    complete(true, true, true);
                 } else {
+                    // Zero frames = true failure
                     complete(false, true);
                 }
             }, remainingMs);
 
+            // GRACEFUL FALLBACK — after gracefulFallbackMs, pass if ANY frames rendered.
+            // This prevents DevTools-dependent hangs where frame gaps exceed threshold
+            // but rendering IS active.
+            gracefulTimeoutId = setTimeout(() => {
+                if (totalFrameCount > 0 && consecutiveStableFrames < this.config.minConsecutiveFrames) {
+                    if (this.config.debug) {
+                        console.log(
+                            `[ENGINE_AWAKENED] Graceful fallback triggered: ` +
+                            `${totalFrameCount} frames, ${consecutiveStableFrames} stable ` +
+                            `(< ${this.config.minConsecutiveFrames} required)`
+                        );
+                    }
+                    complete(true, false, true);
+                }
+            }, this.config.gracefulFallbackMs);
+
             // Monitor NATURAL render frames via onBeforeRender
             // Since Phase 1 burst is complete, all frames here are natural
             observer = this.scene.onBeforeRenderObservable.add(() => {
+                if (resolved) return;
+
                 const now = performance.now();
                 const frameInterval = now - lastFrameTime;
                 lastFrameTime = now;
@@ -373,11 +419,12 @@ export class EngineAwakenedBarrier {
                         );
                     }
                 } else {
-                    // Unstable — reset counter
+                    // Unstable — reset counter but don't reset totalFrameCount
                     if (this.config.debug) {
                         console.warn(
                             `[ENGINE_AWAKENED] Natural frame ${totalFrameCount}: ` +
-                            `dt=${frameInterval.toFixed(1)}ms ⚠️ SPIKE — resetting counter`
+                            `dt=${frameInterval.toFixed(1)}ms ⚠️ SPIKE — resetting consecutive counter ` +
+                            `(total=${totalFrameCount} still counted for graceful fallback)`
                         );
                     }
                     consecutiveStableFrames = 0;
