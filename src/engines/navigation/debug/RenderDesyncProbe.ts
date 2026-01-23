@@ -311,6 +311,25 @@ export class RenderDesyncProbe {
     }
 
     /**
+     * Mark VISUAL_READY on this probe instance.
+     *
+     * This sets `timings.visualReadyPassedAt` DIRECTLY on the instance,
+     * avoiding the race condition where startProbe() copies a stale static value.
+     *
+     * Call this AFTER TacticalGrid is confirmed rendered in a natural RAF frame.
+     * Must be called BEFORE validateAcceptanceCriteria().
+     */
+    markVisualReady(): void {
+        const now = performance.now();
+        const before = this.timings.visualReadyPassedAt;
+        this.timings.visualReadyPassedAt = now;
+        console.log(
+            `[PROBE] VISUAL_READY marked (instance): ` +
+            `before=${before?.toFixed(2) ?? 'null'} → after=${now.toFixed(2)}ms`
+        );
+    }
+
+    /**
      * Mark the actual READY declaration timestamp.
      * Call this when READY is officially declared (after ENGINE_AWAKENED).
      */

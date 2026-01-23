@@ -632,8 +632,11 @@ export class NavigationScene {
                     const elapsed = performance.now() - startTime;
                     cleanup();
 
-                    // Mark VISUAL_READY: confirmed in natural frame
+                    // Mark VISUAL_READY: static (logging) + instance (acceptance criteria)
+                    // Instance mark MUST happen before resolve() to prevent race condition
+                    // where validateAcceptanceCriteria reads null from getTimings().
                     markVisualReadyTimestamp();
+                    this.renderDesyncProbe?.markVisualReady();
 
                     console.log(
                         `[VISUAL_READY v2] ✓ TacticalGrid rendered in natural RAF frame ` +
