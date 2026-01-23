@@ -19,3 +19,17 @@ export type {
     PhysicalProbeReport,
     PhysicalProbeConfig,
 } from './EnginePhysicalStateProbe';
+
+export { BlackHoleForensicProbe } from './BlackHoleForensicProbe';
+export type {
+    IndependentRafRecord,
+    ResizeStarvationState,
+    ForensicFrameRecord,
+    ForensicResizeEvent,
+    ForensicAnomalyType,
+    ForensicAnomaly,
+    ForensicPhaseMarker,
+    PhysicalReadyDefinition,
+    ForensicReport,
+    ForensicProbeConfig,
+} from './BlackHoleForensicProbe';

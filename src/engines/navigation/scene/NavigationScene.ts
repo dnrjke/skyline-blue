@@ -44,6 +44,7 @@ import { CharacterLoadUnit, type FlightAnimationRole } from '../loading/Characte
 import { RenderDesyncProbe, markVisualReadyTimestamp, validateAcceptanceCriteria } from '../debug/RenderDesyncProbe';
 import { BlackHoleLogger } from '../debug/BlackHoleLogger';
 import { EnginePhysicalStateProbe } from '../debug/EnginePhysicalStateProbe';
+import { BlackHoleForensicProbe } from '../debug/BlackHoleForensicProbe';
 
 export interface NavigationSceneConfig {
     /** @deprecated Energy budget is no longer used in Phase 3 */
@@ -105,6 +106,9 @@ export class NavigationScene {
 
     // Debug: Physical State Probe (Resize Black Hole dissection)
     private physicalStateProbe: EnginePhysicalStateProbe | null = null;
+
+    // Debug: Forensic Probe (postmortem-level physical state timeline)
+    private forensicProbe: BlackHoleForensicProbe | null = null;
 
     private currentStage = { episode: 1, stage: 1 } as const;
     private startHooks: NavigationStartHooks | null = null;
@@ -171,6 +175,13 @@ export class NavigationScene {
             maxDurationMs: 600_000,   // 10min max
             snapshotInterval: 10,     // Every 10 frames
             consoleOutput: true,
+        });
+
+        // Debug: Forensic Probe (postmortem-level timeline reconstruction)
+        this.forensicProbe = new BlackHoleForensicProbe(scene, {
+            maxDurationMs: 600_000,
+            consoleOutput: true,
+            convergenceSampleInterval: 30,
         });
     }
 
@@ -405,6 +416,10 @@ export class NavigationScene {
                 this.blackHoleLogger?.markPhase('ENGINE_AWAKENED_START');
                 this.blackHoleLogger?.snapshotGPUState('PRE_BARRIER');
 
+                // Start Forensic Probe: captures full physical timeline from here
+                this.forensicProbe?.start();
+                this.forensicProbe?.markPhase('ENGINE_AWAKENED_START', 'logical');
+
                 console.log('[ENGINE_AWAKENED] Starting two-phase barrier...');
                 hooks?.onLog?.('[ENGINE_AWAKENED] Phase 1: RAF burst, Phase 2: stable detection...');
 
@@ -455,6 +470,10 @@ export class NavigationScene {
                     firstFrameDelay: awakenedResult.firstFrameDelayMs,
                 });
                 this.blackHoleLogger?.snapshotGPUState('POST_BARRIER');
+                this.forensicProbe?.markPhase('ENGINE_AWAKENED_PASSED', 'logical', {
+                    stableFrames: awakenedResult.stableFrameCount,
+                    firstFrameDelay: awakenedResult.firstFrameDelayMs,
+                });
 
                 // ===== CAMERA TRANSITION (starts grid visibility animation) =====
                 // The camera transition controls hologram visibility (0→1 over 1.1s).
@@ -482,6 +501,7 @@ export class NavigationScene {
 
                 this.blackHoleLogger?.markPhase('VISUAL_READY_CONFIRMED');
                 this.blackHoleLogger?.snapshotGPUState('POST_VISUAL_READY');
+                this.forensicProbe?.markPhase('VISUAL_READY_CONFIRMED', 'logical');
 
                 // ===== READY =====
                 // Engine is confirmed awake. Natural frames are stable.
@@ -491,6 +511,7 @@ export class NavigationScene {
                 // Mark READY timestamp for probe validation
                 this.renderDesyncProbe?.markReadyDeclared();
                 this.blackHoleLogger?.markPhase('READY_DECLARED');
+                this.forensicProbe?.markPhase('READY_DECLARED', 'logical');
 
                 // Start Physical State Probe: tracks canvas/engine/hwScale/resize
                 // from READY until PHYSICAL_READY_FRAME or timeout
@@ -538,6 +559,7 @@ export class NavigationScene {
                 hooks?.onLog?.('[UX_READY] Input unlocked');
                 this.blackHoleLogger?.markPhase('UX_READY');
                 this.blackHoleLogger?.markInput('InteractionLayer', true);
+                this.forensicProbe?.markPhase('UX_READY', 'logical');
 
                 // Now safe: attach camera controls, unlock input, finalize
                 this.inputLocked = false;
@@ -552,6 +574,13 @@ export class NavigationScene {
                 // (probe continues running for extended monitoring — auto-stops at maxDurationMs)
                 if (this.physicalStateProbe?.isActive()) {
                     this.physicalStateProbe.printAnalysis();
+                }
+
+                // Forensic Probe: mark normalization and print initial report
+                // (probe keeps running to capture the full physical timeline)
+                this.forensicProbe?.markPhase('NORMALIZATION_COMPLETE', 'logical');
+                if (this.forensicProbe?.isActive()) {
+                    this.forensicProbe.printReport();
                 }
 
                 // Log summary to console for easy access
@@ -833,6 +862,7 @@ export class NavigationScene {
         this.renderDesyncProbe?.dispose();
         this.blackHoleLogger?.dispose();
         this.physicalStateProbe?.dispose();
+        this.forensicProbe?.dispose();
 
         if (this.characterLoadUnit) {
             this.characterLoadUnit.dispose();
