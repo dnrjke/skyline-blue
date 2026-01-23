@@ -1,7 +1,7 @@
 /**
  * EngineAwakenedBarrier - Hard Gate for Babylon RAF Warmup
  *
- * ⚠️ CRITICAL: This barrier MUST pass BEFORE READY is declared.
+ * CRITICAL: This barrier MUST pass BEFORE READY is declared.
  * This is NOT a cosmetic delay. This is a correctness guarantee.
  *
  * THE BUG:
@@ -9,13 +9,19 @@
  * DevTools / resize events merely woke the RAF, masking the real issue:
  * premature READY signaling before RAF warmup.
  *
- * SOLUTION:
- * ENGINE_AWAKENED_BARRIER is a HARD GATE that:
- * 1. Actively kicks RAF awake via forced frame cycle
- *    (engine.beginFrame + scene.render + engine.endFrame + RAF chain)
- * 2. Waits for actual onBeforeRender ticks (proves RAF is alive)
- * 3. Requires N consecutive stable frames (proves RAF is stable)
- * 4. HARD FAILS if no frames arrive (never auto-passes on timeout)
+ * SOLUTION: Two-phase hard gate:
+ *
+ * Phase 1 — RAF Wake-Up Burst:
+ *   Execute N consecutive forced frames via RAF chain.
+ *   engine.beginFrame() → scene.render() → engine.endFrame()
+ *   This establishes "animation intent" with the browser compositor.
+ *   NO observer registration. NO frame counting. Pure execution.
+ *
+ * Phase 2 — Natural Stable Detection:
+ *   Register onBeforeRender observer.
+ *   Wait for M consecutive NATURAL frames with dt < threshold.
+ *   Only natural RAF-scheduled frames count toward stability.
+ *   Forced frames from Phase 1 are never counted.
  *
  * FORBIDDEN kick mechanisms:
  * - engine.resize() — masks the bug, doesn't fix it
@@ -23,20 +29,20 @@
  * - camera manipulation / attachControl — UX side effect
  * - User input events — not available during loading
  *
- * NEW FLOW (required):
- *   VISUAL_READY → ENGINE_AWAKENED → READY → UX_READY
+ * WHY BURST > SINGLE KICK:
+ * A single forced frame proves "GPU can render" but doesn't convince
+ * the browser's compositor that ongoing animation is intended.
+ * A burst of 4-5 RAF-chained frames establishes rendering cadence,
+ * equivalent to what DevTools accidentally achieves.
  *
- * Acceptance Criteria (RenderDesyncProbe-based):
- * - firstBeforeRenderAt exists
- * - (firstBeforeRenderAt - barrierStartAt) <= 50ms
- * - At least minConsecutiveFrames stable frames rendered
- * - No frame gap > maxAllowedFrameGapMs after first stable frame
+ * NEW FLOW:
+ *   VISUAL_READY → [Phase 1: Burst] → [Phase 2: Natural Stable] → READY → UX_READY
  */
 
 import * as BABYLON from '@babylonjs/core';
 
 export interface EngineAwakenedConfig {
-    /** Minimum consecutive STABLE frames required (default: 3) */
+    /** Minimum consecutive STABLE natural frames required (default: 3) */
     minConsecutiveFrames?: number;
     /** Maximum allowed frame gap in ms (default: 50) */
     maxAllowedFrameGapMs?: number;
@@ -44,18 +50,18 @@ export interface EngineAwakenedConfig {
     maxWaitMs?: number;
     /** Enable debug logging */
     debug?: boolean;
-    /** Number of RAF kick attempts before giving up (default: 3) */
-    maxKickAttempts?: number;
-    /** Interval between kick attempts in ms (default: 100) */
-    kickIntervalMs?: number;
+    /** Number of forced frames in the wake-up burst (default: 5) */
+    burstFrameCount?: number;
+    /** Maximum retry attempts if natural frames don't follow burst (default: 2) */
+    maxBurstRetries?: number;
 }
 
 export interface EngineAwakenedResult {
     /** Whether the barrier passed successfully */
     passed: boolean;
-    /** Number of total frames rendered during barrier */
+    /** Number of NATURAL frames rendered during Phase 2 */
     framesRendered: number;
-    /** Number of consecutive stable frames achieved */
+    /** Number of consecutive stable natural frames achieved */
     stableFrameCount: number;
     /** Time taken from barrier start in ms */
     elapsedMs: number;
@@ -63,19 +69,19 @@ export interface EngineAwakenedResult {
     timedOut: boolean;
     /** Average frame interval of stable frames in ms */
     avgFrameIntervalMs: number;
-    /** Max frame interval observed in ms */
+    /** Max frame interval observed during Phase 2 in ms */
     maxFrameIntervalMs: number;
-    /** Time from barrier start to first onBeforeRender tick */
+    /** Time from Phase 2 start to first natural onBeforeRender tick */
     firstFrameDelayMs: number;
-    /** Number of RAF kicks required to wake engine */
-    kicksRequired: number;
+    /** Number of burst iterations executed */
+    burstCount: number;
 }
 
 /**
- * EngineAwakenedBarrier - Wait for STABLE render loop activity
+ * EngineAwakenedBarrier - Wait for STABLE natural render loop activity.
  *
  * This is a HARD GATE. Timeout = FAIL, not auto-pass.
- * The only way to pass is actual stable frame rendering.
+ * The only way to pass is actual stable NATURAL frame rendering.
  */
 export class EngineAwakenedBarrier {
     private scene: BABYLON.Scene;
@@ -89,8 +95,8 @@ export class EngineAwakenedBarrier {
             maxAllowedFrameGapMs: config.maxAllowedFrameGapMs ?? 50,
             maxWaitMs: config.maxWaitMs ?? 3000,
             debug: config.debug ?? true,
-            maxKickAttempts: config.maxKickAttempts ?? 3,
-            kickIntervalMs: config.kickIntervalMs ?? 100,
+            burstFrameCount: config.burstFrameCount ?? 5,
+            maxBurstRetries: config.maxBurstRetries ?? 2,
         };
     }
 
@@ -98,10 +104,9 @@ export class EngineAwakenedBarrier {
      * Wait for render loop to be confirmed STABLY active.
      *
      * Strategy:
-     * 1. Kick RAF awake (forced frame cycle + RAF chain)
-     * 2. Wait for first onBeforeRender (proves RAF is alive)
-     * 3. Count consecutive stable frames (proves RAF is stable)
-     * 4. HARD FAIL if no frames arrive within timeout
+     * 1. Phase 1: RAF Wake-Up Burst (forced frames, no measurement)
+     * 2. Phase 2: Natural Stable Detection (onBeforeRender, dt-based)
+     * 3. HARD FAIL if natural frames don't arrive within timeout
      */
     async wait(): Promise<EngineAwakenedResult> {
         if (this.disposed) {
@@ -112,202 +117,145 @@ export class EngineAwakenedBarrier {
 
         if (this.config.debug) {
             console.log(
-                `[ENGINE_AWAKENED] Starting barrier: require ${this.config.minConsecutiveFrames} ` +
-                `consecutive frames with dt < ${this.config.maxAllowedFrameGapMs}ms`
+                `[ENGINE_AWAKENED] Starting barrier: ` +
+                `burst=${this.config.burstFrameCount} frames, ` +
+                `require ${this.config.minConsecutiveFrames} consecutive natural frames ` +
+                `with dt < ${this.config.maxAllowedFrameGapMs}ms`
             );
         }
 
-        // Phase 1: Kick RAF awake
-        const kicksRequired = await this.kickRAFAwake(startTime);
+        // ===== PHASE 1: RAF WAKE-UP BURST =====
+        // Execute N forced frames via RAF chain.
+        // NO observers. NO frame counting. Pure execution.
+        // Purpose: Establish "animation intent" with browser compositor.
+        let burstCount = 0;
 
-        if (this.disposed) return this.createFailResult(0, 'disposed during kick');
+        for (let retry = 0; retry <= this.config.maxBurstRetries; retry++) {
+            if (this.disposed) return this.createFailResult(0, 'disposed during burst');
 
-        // Phase 2: Wait for stable frames
-        const result = await this.waitForStableFrames(startTime, kicksRequired);
+            burstCount++;
+            if (this.config.debug) {
+                console.log(
+                    `[ENGINE_AWAKENED] Phase 1: Burst ${burstCount} ` +
+                    `(${this.config.burstFrameCount} forced frames via RAF chain)`
+                );
+            }
+
+            await this.executeWakeUpBurst();
+
+            // Check timeout between retries
+            if (performance.now() - startTime > this.config.maxWaitMs * 0.5) {
+                if (this.config.debug) {
+                    console.warn('[ENGINE_AWAKENED] Phase 1: Half of timeout consumed, entering Phase 2');
+                }
+                break;
+            }
+        }
+
+        if (this.disposed) return this.createFailResult(burstCount, 'disposed after burst');
+
+        // ===== PHASE 2: NATURAL STABLE DETECTION =====
+        // Register onBeforeRender observer.
+        // Wait for M consecutive natural frames with dt < threshold.
+        // Only NATURAL RAF-scheduled frames count. Forced frames are excluded.
+        if (this.config.debug) {
+            console.log('[ENGINE_AWAKENED] Phase 2: Waiting for natural stable frames...');
+        }
+
+        const result = await this.waitForNaturalStableFrames(startTime, burstCount);
 
         return result;
     }
 
     /**
-     * Phase 1: Actively kick the RAF/render loop awake.
+     * Phase 1: Execute the RAF Wake-Up Burst.
      *
-     * WHY THIS EXISTS:
-     * Babylon's runRenderLoop registers a RAF callback, but the browser may
-     * not actually schedule it (initial load, heavy GC, background tab).
-     * Result: render loop is "registered" but RAF never fires.
-     * DevTools opening accidentally wakes RAF — masking the real bug.
+     * Executes burstFrameCount forced frames, each scheduled via requestAnimationFrame.
+     * This is NOT a single synchronous render — each frame goes through the full
+     * browser RAF scheduling pipeline:
      *
-     * STRATEGY (no resize, no DevTools, no visibility API):
-     * 1. Check if render loop is already ticking naturally
-     * 2. If not, force a complete frame cycle:
-     *    engine.beginFrame() → scene.render() → engine.endFrame()
-     *    This mirrors exactly what Babylon's internal _renderLoop does.
-     * 3. Chain RAF callbacks with forced frames to prime the RAF scheduler
-     * 4. Verify natural render loop ticks follow
+     *   RAF callback → engine.beginFrame() → scene.render() → engine.endFrame()
      *
-     * FORBIDDEN: engine.resize(), camera manipulation, visibility API,
-     *            DevTools, user input events
+     * WHY RAF CHAIN (not synchronous):
+     * - Synchronous renders don't engage the browser's RAF scheduler
+     * - RAF-chained frames teach the compositor "this tab has animation"
+     * - This is what DevTools accidentally achieves (constant repaint requests)
      *
-     * Returns: number of kicks required (0 if already awake)
+     * RULES:
+     * - NO observer registration (onBeforeRender observer count = 0)
+     * - NO frame counting (these frames don't count toward stability)
+     * - NO measurement (RenderDesyncProbe recording is allowed externally)
+     * - Each frame is a complete Babylon frame cycle
      */
-    private async kickRAFAwake(startTime: number): Promise<number> {
-        const engine = this.scene.getEngine();
-        let kickCount = 0;
-        let rafAlive = false;
-
-        for (let attempt = 0; attempt < this.config.maxKickAttempts; attempt++) {
-            if (this.disposed) break;
-
-            // Check if RAF is already alive (natural render loop frames arriving)
-            const framesBefore = await this.countFramesInWindow(16);
-            if (framesBefore > 0) {
-                if (this.config.debug) {
-                    console.log(`[ENGINE_AWAKENED] RAF already alive (detected ${framesBefore} natural frames)`);
-                }
-                rafAlive = true;
-                break;
-            }
-
-            // Kick attempt
-            kickCount++;
-            if (this.config.debug) {
-                console.log(`[ENGINE_AWAKENED] RAF kick attempt ${kickCount}/${this.config.maxKickAttempts}`);
-            }
-
-            // === KICK STRATEGY: Forced Frame Cycle ===
-            // This mirrors Babylon's internal _renderLoop behavior:
-            //   engine.beginFrame() → scene.render() → engine.endFrame()
-            // Forcing this cycle primes the GPU pipeline and triggers observers,
-            // which can re-engage the RAF scheduler.
-
-            try {
-                // Step 1: Force a complete Babylon frame cycle (synchronous)
-                // beginFrame() prepares GPU timing, endFrame() presents the frame
-                engine.beginFrame();
-                this.scene.render();
-                engine.endFrame();
-
-                if (this.config.debug) {
-                    console.log(`[ENGINE_AWAKENED] Kick ${kickCount}: forced frame cycle complete`);
-                }
-            } catch (e) {
-                // scene may not be fully ready — this is non-fatal
-                if (this.config.debug) {
-                    console.warn(`[ENGINE_AWAKENED] Kick ${kickCount}: forced frame threw:`, e);
-                }
-            }
-
-            // Step 2: Chain direct RAF callbacks with forced renders
-            // This re-enters the browser RAF scheduler, proving it's alive.
-            // Each RAF tick forces another frame, building momentum.
-            await this.rafChainWithRender(2);
-
-            // Step 3: Wait and check if natural render loop frames follow
-            // After our forced kicks, the engine's registered render loop
-            // should now be getting RAF callbacks naturally.
-            const framesAfter = await this.countFramesInWindow(this.config.kickIntervalMs);
-            if (framesAfter > 0) {
-                if (this.config.debug) {
-                    console.log(
-                        `[ENGINE_AWAKENED] RAF woke up after kick ${kickCount}: ` +
-                        `${framesAfter} frames in ${this.config.kickIntervalMs}ms window`
-                    );
-                }
-                rafAlive = true;
-                break;
-            }
-
-            // Check timeout
-            if (performance.now() - startTime > this.config.maxWaitMs) {
-                break;
-            }
-        }
-
-        if (!rafAlive && this.config.debug) {
-            console.warn(`[ENGINE_AWAKENED] ⚠️ RAF NOT responding after ${kickCount} kicks`);
-        }
-
-        return kickCount;
-    }
-
-    /**
-     * Chain N requestAnimationFrame callbacks, each forcing a frame render.
-     *
-     * Purpose: Prime the browser's RAF scheduler by executing actual work
-     * inside RAF callbacks. This teaches the browser that this tab needs
-     * rendering priority, re-engaging the render loop.
-     *
-     * Each RAF tick does: engine.beginFrame() → scene.render() → engine.endFrame()
-     * This is the minimum complete frame Babylon needs.
-     */
-    private rafChainWithRender(count: number): Promise<void> {
+    private executeWakeUpBurst(): Promise<void> {
         return new Promise((resolve) => {
-            let remaining = count;
+            let remaining = this.config.burstFrameCount;
             const engine = this.scene.getEngine();
+            let frameIndex = 0;
 
             const tick = () => {
                 if (remaining <= 0 || this.disposed) {
+                    if (this.config.debug) {
+                        console.log(
+                            `[ENGINE_AWAKENED] Burst complete: ` +
+                            `${frameIndex} forced frames executed`
+                        );
+                    }
                     resolve();
                     return;
                 }
 
                 remaining--;
+                frameIndex++;
 
                 try {
+                    // Complete Babylon frame cycle — mirrors internal _renderLoop
                     engine.beginFrame();
                     this.scene.render();
                     engine.endFrame();
-                } catch {
+                } catch (e) {
                     // Non-fatal: scene may still be initializing
+                    if (this.config.debug && frameIndex === 1) {
+                        console.warn('[ENGINE_AWAKENED] Burst frame threw (non-fatal):', e);
+                    }
                 }
 
+                // Schedule next frame via RAF — this is the key to establishing cadence
                 requestAnimationFrame(tick);
             };
 
+            // Start the chain with the first RAF callback
             requestAnimationFrame(tick);
         });
     }
 
     /**
-     * Count how many onBeforeRender frames occur in a time window.
-     * Used to detect if the render loop is already active.
-     */
-    private countFramesInWindow(windowMs: number): Promise<number> {
-        return new Promise((resolve) => {
-            let count = 0;
-            const observer = this.scene.onBeforeRenderObservable.add(() => {
-                count++;
-            });
-
-            setTimeout(() => {
-                this.scene.onBeforeRenderObservable.remove(observer);
-                resolve(count);
-            }, windowMs);
-        });
-    }
-
-    /**
-     * Phase 2: Wait for N consecutive stable frames.
+     * Phase 2: Wait for N consecutive NATURAL stable frames.
+     *
+     * A "natural" frame is one triggered by Babylon's own runRenderLoop RAF callback,
+     * NOT by our forced frame cycle. Since Phase 1 is complete before Phase 2 starts,
+     * all frames observed here are natural.
      *
      * A frame is "stable" if its dt (time since last frame) is < maxAllowedFrameGapMs.
-     * The first frame is allowed to be slow (cold start), but subsequent frames must be stable.
+     * The first frame is allowed to be slow (cold start), subsequent must be stable.
      *
      * HARD GATE: If timeout expires with insufficient stable frames, this FAILS.
      * There is NO auto-pass. The caller must handle failure.
      */
-    private waitForStableFrames(
+    private waitForNaturalStableFrames(
         startTime: number,
-        kicksRequired: number
+        burstCount: number
     ): Promise<EngineAwakenedResult> {
         return new Promise((resolve) => {
             if (this.disposed) {
-                resolve(this.createFailResult(kicksRequired, 'disposed'));
+                resolve(this.createFailResult(burstCount, 'disposed'));
                 return;
             }
 
+            const phase2Start = performance.now();
             let totalFrameCount = 0;
             let consecutiveStableFrames = 0;
-            let lastFrameTime = performance.now();
+            let lastFrameTime = phase2Start;
             let firstFrameTime: number | null = null;
             let stableFrameIntervals: number[] = [];
             let maxFrameInterval = 0;
@@ -334,7 +282,7 @@ export class EngineAwakenedBarrier {
                     : 0;
 
                 const firstFrameDelayMs = firstFrameTime !== null
-                    ? firstFrameTime - startTime
+                    ? firstFrameTime - phase2Start
                     : -1;
 
                 const result: EngineAwakenedResult = {
@@ -346,21 +294,23 @@ export class EngineAwakenedBarrier {
                     avgFrameIntervalMs,
                     maxFrameIntervalMs: maxFrameInterval,
                     firstFrameDelayMs,
-                    kicksRequired,
+                    burstCount,
                 };
 
                 if (this.config.debug) {
                     if (passed) {
                         console.log(
-                            `[ENGINE_AWAKENED] ✓ PASSED: ${consecutiveStableFrames} stable frames, ` +
+                            `[ENGINE_AWAKENED] ✓ PASSED: ` +
+                            `${consecutiveStableFrames} stable natural frames, ` +
                             `avg dt=${avgFrameIntervalMs.toFixed(1)}ms, ` +
-                            `first frame delay=${firstFrameDelayMs.toFixed(1)}ms, ` +
-                            `kicks=${kicksRequired}, elapsed=${elapsedMs.toFixed(1)}ms`
+                            `first natural frame delay=${firstFrameDelayMs.toFixed(1)}ms, ` +
+                            `bursts=${burstCount}, total elapsed=${elapsedMs.toFixed(1)}ms`
                         );
                     } else {
                         console.error(
-                            `[ENGINE_AWAKENED] ✗ HARD FAIL: ${totalFrameCount} total frames, ` +
-                            `${consecutiveStableFrames} stable, ` +
+                            `[ENGINE_AWAKENED] ✗ HARD FAIL: ` +
+                            `${totalFrameCount} natural frames observed, ` +
+                            `${consecutiveStableFrames} consecutive stable, ` +
                             `maxDt=${maxFrameInterval.toFixed(1)}ms, ` +
                             `timedOut=${timedOut}, elapsed=${elapsedMs.toFixed(1)}ms`
                         );
@@ -370,11 +320,9 @@ export class EngineAwakenedBarrier {
                 resolve(result);
             };
 
-            // HARD timeout — this is a FAIL, not auto-pass
+            // HARD timeout — FAIL if natural stable frames don't arrive
             const remainingMs = Math.max(0, this.config.maxWaitMs - (performance.now() - startTime));
             timeoutId = setTimeout(() => {
-                // HARD GATE: timeout = FAIL
-                // Only pass if we actually achieved the required stable frame count
                 if (consecutiveStableFrames >= this.config.minConsecutiveFrames) {
                     complete(true, false);
                 } else {
@@ -382,7 +330,8 @@ export class EngineAwakenedBarrier {
                 }
             }, remainingMs);
 
-            // Monitor render frames via onBeforeRender
+            // Monitor NATURAL render frames via onBeforeRender
+            // Since Phase 1 burst is complete, all frames here are natural
             observer = this.scene.onBeforeRenderObservable.add(() => {
                 const now = performance.now();
                 const frameInterval = now - lastFrameTime;
@@ -390,25 +339,26 @@ export class EngineAwakenedBarrier {
 
                 totalFrameCount++;
 
-                // Record first frame timing
+                // Record first natural frame timing
                 if (totalFrameCount === 1) {
                     firstFrameTime = now;
                     if (this.config.debug) {
+                        const delayFromPhase2 = now - phase2Start;
                         const delayFromStart = now - startTime;
                         console.log(
-                            `[ENGINE_AWAKENED] First onBeforeRender tick: ` +
-                            `delay=${delayFromStart.toFixed(1)}ms from barrier start`
+                            `[ENGINE_AWAKENED] First natural onBeforeRender: ` +
+                            `delay=${delayFromPhase2.toFixed(1)}ms from Phase 2 start, ` +
+                            `${delayFromStart.toFixed(1)}ms from barrier start`
                         );
                     }
-                    // First frame is allowed to be slow (cold start)
-                    // Don't count it toward stability, just record it
+                    // First frame is allowed to be slow (post-burst cold start)
                     return;
                 }
 
                 // Track max interval
                 maxFrameInterval = Math.max(maxFrameInterval, frameInterval);
 
-                // Check if this frame interval is stable
+                // Check stability
                 const isStable = frameInterval < this.config.maxAllowedFrameGapMs;
 
                 if (isStable) {
@@ -417,16 +367,16 @@ export class EngineAwakenedBarrier {
 
                     if (this.config.debug && consecutiveStableFrames <= this.config.minConsecutiveFrames) {
                         console.log(
-                            `[ENGINE_AWAKENED] Frame ${totalFrameCount}: ` +
+                            `[ENGINE_AWAKENED] Natural frame ${totalFrameCount}: ` +
                             `dt=${frameInterval.toFixed(1)}ms ✓ stable ` +
                             `(${consecutiveStableFrames}/${this.config.minConsecutiveFrames})`
                         );
                     }
                 } else {
-                    // Unstable frame — reset consecutive counter
+                    // Unstable — reset counter
                     if (this.config.debug) {
                         console.warn(
-                            `[ENGINE_AWAKENED] Frame ${totalFrameCount}: ` +
+                            `[ENGINE_AWAKENED] Natural frame ${totalFrameCount}: ` +
                             `dt=${frameInterval.toFixed(1)}ms ⚠️ SPIKE — resetting counter`
                         );
                     }
@@ -434,7 +384,7 @@ export class EngineAwakenedBarrier {
                     stableFrameIntervals = [];
                 }
 
-                // Check if we have enough consecutive stable frames
+                // Check pass condition
                 if (consecutiveStableFrames >= this.config.minConsecutiveFrames) {
                     complete(true);
                 }
@@ -445,7 +395,7 @@ export class EngineAwakenedBarrier {
     /**
      * Create a failure result (for early exits)
      */
-    private createFailResult(kicksRequired: number, reason: string): EngineAwakenedResult {
+    private createFailResult(burstCount: number, reason: string): EngineAwakenedResult {
         if (this.config.debug) {
             console.error(`[ENGINE_AWAKENED] ✗ FAIL: ${reason}`);
         }
@@ -458,7 +408,7 @@ export class EngineAwakenedBarrier {
             avgFrameIntervalMs: 0,
             maxFrameIntervalMs: 0,
             firstFrameDelayMs: -1,
-            kicksRequired,
+            burstCount,
         };
     }
 

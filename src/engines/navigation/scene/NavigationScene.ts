@@ -376,69 +376,87 @@ export class NavigationScene {
 
             // ===== ENGINE_AWAKENED_BARRIER (HARD GATE) =====
             // PREREQUISITE for READY — must pass before any UX action.
-            // Flow: VISUAL_READY → ENGINE_AWAKENED → READY → UX_READY
+            // Flow: VISUAL_READY → [Phase 1: Burst] → [Phase 2: Natural Stable] → READY → UX_READY
+            //
+            // Phase 1: RAF Wake-Up Burst (forced frames, no measurement)
+            // Phase 2: Natural Stable Detection (onBeforeRender, dt-based)
             //
             // ⚠️ This is a HARD GATE. If it fails, READY is NEVER declared.
-            // There is no "degraded confidence" path.
             if (result.phase === LoadingPhase.READY) {
-                console.log('[ENGINE_AWAKENED] Waiting for stable render loop...');
-                hooks?.onLog?.('[ENGINE_AWAKENED] Verifying render loop stability...');
+                console.log('[ENGINE_AWAKENED] Starting two-phase barrier...');
+                hooks?.onLog?.('[ENGINE_AWAKENED] Phase 1: RAF burst, Phase 2: stable detection...');
 
                 const awakenedResult = await waitForEngineAwakened(this.scene, {
                     minConsecutiveFrames: 3,
                     maxAllowedFrameGapMs: 50,
                     maxWaitMs: 3000,
-                    maxKickAttempts: 3,
-                    kickIntervalMs: 100,
+                    burstFrameCount: 5,
+                    maxBurstRetries: 2,
                     debug: true,
                 });
 
                 if (!awakenedResult.passed) {
-                    // HARD FAIL — engine never achieved stable rendering
+                    // HARD FAIL — engine never achieved stable natural rendering
                     console.error(
                         '[ENGINE_AWAKENED] ✗ HARD GATE FAILED. READY will NOT be declared.',
-                        `frames=${awakenedResult.framesRendered}, ` +
+                        `naturalFrames=${awakenedResult.framesRendered}, ` +
                         `stable=${awakenedResult.stableFrameCount}, ` +
-                        `firstFrameDelay=${awakenedResult.firstFrameDelayMs.toFixed(1)}ms, ` +
+                        `firstNaturalFrameDelay=${awakenedResult.firstFrameDelayMs.toFixed(1)}ms, ` +
+                        `bursts=${awakenedResult.burstCount}, ` +
                         `timedOut=${awakenedResult.timedOut}`
                     );
-                    hooks?.onLog?.('[ENGINE_AWAKENED] ✗ HARD FAIL — render loop unstable');
+                    hooks?.onLog?.('[ENGINE_AWAKENED] ✗ HARD FAIL — natural render loop unstable');
                     throw new Error(
-                        `ENGINE_AWAKENED barrier failed: ${awakenedResult.framesRendered} frames, ` +
-                        `${awakenedResult.stableFrameCount} stable (need ${3})`
+                        `ENGINE_AWAKENED barrier failed: ${awakenedResult.framesRendered} natural frames, ` +
+                        `${awakenedResult.stableFrameCount} stable (need 3), ` +
+                        `bursts=${awakenedResult.burstCount}`
                     );
                 }
 
                 // ===== ACCEPTANCE CRITERIA VALIDATION =====
-                // Verify first frame delay meets acceptance threshold
+                // First natural frame delay check
                 if (awakenedResult.firstFrameDelayMs > 50) {
                     console.warn(
-                        `[ENGINE_AWAKENED] ⚠️ First frame delay ${awakenedResult.firstFrameDelayMs.toFixed(1)}ms > 50ms threshold. ` +
-                        `RAF was slow to start (kicks=${awakenedResult.kicksRequired}).`
+                        `[ENGINE_AWAKENED] ⚠️ First natural frame delay ` +
+                        `${awakenedResult.firstFrameDelayMs.toFixed(1)}ms > 50ms threshold ` +
+                        `(bursts=${awakenedResult.burstCount}).`
                     );
                     hooks?.onLog?.(
-                        `[ENGINE_AWAKENED] ⚠️ First frame delay: ${Math.round(awakenedResult.firstFrameDelayMs)}ms`
+                        `[ENGINE_AWAKENED] ⚠️ First natural frame delay: ${Math.round(awakenedResult.firstFrameDelayMs)}ms`
                     );
                 }
 
                 // ===== READY =====
-                // Engine is confirmed awake and stable. Now safe to start visual transitions.
-                // At this point: RAF is running, frames are stable, firstBeforeRender has occurred.
+                // Engine is confirmed awake. Natural frames are stable.
+                // At this point: RAF is running, 3+ consecutive stable natural frames confirmed.
 
                 // Mark READY timestamp for probe validation
                 this.renderDesyncProbe?.markReadyDeclared();
 
                 console.log(
                     `[READY] Engine confirmed awake: ` +
-                    `${awakenedResult.stableFrameCount} stable frames, ` +
+                    `${awakenedResult.stableFrameCount} stable natural frames, ` +
                     `avg dt=${awakenedResult.avgFrameIntervalMs.toFixed(1)}ms, ` +
-                    `first frame delay=${awakenedResult.firstFrameDelayMs.toFixed(1)}ms`
+                    `first natural frame delay=${awakenedResult.firstFrameDelayMs.toFixed(1)}ms, ` +
+                    `bursts=${awakenedResult.burstCount}`
                 );
-                hooks?.onLog?.('[READY] Render loop stable — camera transition starting');
+                hooks?.onLog?.('[READY] Natural render loop stable — camera transition starting');
 
-                // Validate acceptance criteria (diagnostic — does not block)
+                // Validate RenderDesyncProbe acceptance criteria (BLOCKING)
+                // If probe FAILS → READY is revoked, treated as loading failure
                 if (this.renderDesyncProbe) {
-                    validateAcceptanceCriteria(this.renderDesyncProbe);
+                    const probeResult = validateAcceptanceCriteria(this.renderDesyncProbe);
+                    if (!probeResult.passed) {
+                        console.error(
+                            '[READY] ✗ RenderDesyncProbe acceptance FAILED:',
+                            probeResult.details.join('; ')
+                        );
+                        hooks?.onLog?.('[READY] ✗ Probe acceptance FAILED — aborting READY');
+                        throw new Error(
+                            `RenderDesyncProbe acceptance failed: ${probeResult.details.join('; ')}`
+                        );
+                    }
+                    console.log('[READY] ✓ RenderDesyncProbe acceptance PASSED');
                 }
 
                 // Camera transition starts at READY (not before)
