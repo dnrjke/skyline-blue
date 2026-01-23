@@ -7,3 +7,6 @@
 
 export { RenderDesyncProbe, markVisualReadyTimestamp } from './RenderDesyncProbe';
 export type { RenderDesyncTimings, CanvasEngineState } from './RenderDesyncProbe';
+
+export { BlackHoleLogger } from './BlackHoleLogger';
+export type { BlackHoleEntry, BlackHoleConfig, BlackHoleCategory, LogLevel } from './BlackHoleLogger';

@@ -42,6 +42,7 @@ import { CharacterLoadUnit, type FlightAnimationRole } from '../loading/Characte
 
 // Debug: Render Desync Investigation
 import { RenderDesyncProbe, markVisualReadyTimestamp, validateAcceptanceCriteria } from '../debug/RenderDesyncProbe';
+import { BlackHoleLogger } from '../debug/BlackHoleLogger';
 
 export interface NavigationSceneConfig {
     /** @deprecated Energy budget is no longer used in Phase 3 */
@@ -98,6 +99,9 @@ export class NavigationScene {
     // Debug: Render Desync Probe
     private renderDesyncProbe: RenderDesyncProbe | null = null;
 
+    // Debug: BlackHole Logger (ultra-precision READY→normalization gap tracker)
+    private blackHoleLogger: BlackHoleLogger | null = null;
+
     private currentStage = { episode: 1, stage: 1 } as const;
     private startHooks: NavigationStartHooks | null = null;
     private config: NavigationSceneConfig;
@@ -148,6 +152,15 @@ export class NavigationScene {
 
         // Debug: Create Render Desync Probe
         this.renderDesyncProbe = new RenderDesyncProbe(scene);
+
+        // Debug: Create BlackHole Logger (enabled for READY→normalization tracking)
+        this.blackHoleLogger = new BlackHoleLogger(scene, {
+            enabled: true,
+            stallThresholdMs: 100,
+            meshSampleInterval: 5,
+            autoStopMs: 300_000,
+            consoleStalls: true,
+        });
     }
 
     private setupTacticalCallbacks(): void {
@@ -375,6 +388,12 @@ export class NavigationScene {
             //
             // ⚠️ This is a HARD GATE. If it fails, READY is NEVER declared.
             if (result.phase === LoadingPhase.READY) {
+                // Start BlackHole Logger at the point where rendering should be stable
+                this.blackHoleLogger?.start();
+                this.blackHoleLogger?.trackMesh('TacticalGrid');
+                this.blackHoleLogger?.markPhase('ENGINE_AWAKENED_START');
+                this.blackHoleLogger?.snapshotGPUState('PRE_BARRIER');
+
                 console.log('[ENGINE_AWAKENED] Starting two-phase barrier...');
                 hooks?.onLog?.('[ENGINE_AWAKENED] Phase 1: RAF burst, Phase 2: stable detection...');
 
@@ -419,12 +438,20 @@ export class NavigationScene {
                     );
                 }
 
+                this.blackHoleLogger?.markPhase('ENGINE_AWAKENED_PASSED', {
+                    stableFrames: awakenedResult.stableFrameCount,
+                    burstCount: awakenedResult.burstCount,
+                    firstFrameDelay: awakenedResult.firstFrameDelayMs,
+                });
+                this.blackHoleLogger?.snapshotGPUState('POST_BARRIER');
+
                 // ===== CAMERA TRANSITION (starts grid visibility animation) =====
                 // The camera transition controls hologram visibility (0→1 over 1.1s).
                 // It MUST start BEFORE VISUAL_READY check so the grid becomes renderable.
                 // Without this, the grid has visibility=0 and never appears in activeMeshes.
                 console.log('[TRANSITION] Starting camera transition (grid fade-in)...');
                 hooks?.onLog?.('[TRANSITION] Camera + grid visibility animation starting...');
+                this.blackHoleLogger?.markTransition('CAMERA_GRID', 'start');
 
                 const transitionDone = new Promise<void>((resolveTransition) => {
                     this.cameraController.transitionIn(LAYOUT.HOLOGRAM.GRID_SIZE / 2, () => {
@@ -442,6 +469,9 @@ export class NavigationScene {
 
                 await this.waitForNaturalVisualReady();
 
+                this.blackHoleLogger?.markPhase('VISUAL_READY_CONFIRMED');
+                this.blackHoleLogger?.snapshotGPUState('POST_VISUAL_READY');
+
                 // ===== READY =====
                 // Engine is confirmed awake. Natural frames are stable.
                 // VISUAL_READY confirmed: TacticalGrid rendered in natural frame (visibility > 0).
@@ -449,6 +479,7 @@ export class NavigationScene {
 
                 // Mark READY timestamp for probe validation
                 this.renderDesyncProbe?.markReadyDeclared();
+                this.blackHoleLogger?.markPhase('READY_DECLARED');
 
                 console.log(
                     `[READY] Engine confirmed awake: ` +
@@ -479,6 +510,8 @@ export class NavigationScene {
                 // Wait for camera transition to complete (grid fully visible)
                 // This ensures the grid is at visibility=1 before user interaction
                 await transitionDone;
+                this.blackHoleLogger?.markTransition('CAMERA_GRID', 'complete');
+                this.blackHoleLogger?.snapshotGPUState('POST_TRANSITION');
                 console.log('[READY] Camera transition and grid visibility complete');
 
                 // ===== UX_READY (1 frame after transition) =====
@@ -488,10 +521,28 @@ export class NavigationScene {
 
                 console.log('[UX_READY] Input unlock + controls attach');
                 hooks?.onLog?.('[UX_READY] Input unlocked');
+                this.blackHoleLogger?.markPhase('UX_READY');
+                this.blackHoleLogger?.markInput('InteractionLayer', true);
 
                 // Now safe: attach camera controls, unlock input, finalize
                 this.inputLocked = false;
                 this.finalizeNavigationReady();
+
+                // BlackHole Logger: normalization complete, stop tracking
+                this.blackHoleLogger?.snapshotGPUState('POST_UX_READY');
+                this.blackHoleLogger?.markPhase('NORMALIZATION_COMPLETE');
+                this.blackHoleLogger?.stop();
+
+                // Log summary to console for easy access
+                if (this.blackHoleLogger?.isActive() === false) {
+                    const stallSummary = this.blackHoleLogger.getStallSummary();
+                    if (stallSummary.count > 0) {
+                        console.warn(
+                            `[BlackHole] Summary: ${stallSummary.count} stalls detected, ` +
+                            `maxGap=${stallSummary.maxGapMs.toFixed(0)}ms`
+                        );
+                    }
+                }
 
                 hooks?.onProgress?.(1);
                 hooks?.onReady?.();
@@ -757,8 +808,9 @@ export class NavigationScene {
         this.hologram.dispose();
         this.disposeEnvironment();
 
-        // Debug: Dispose probe
+        // Debug: Dispose probe and logger
         this.renderDesyncProbe?.dispose();
+        this.blackHoleLogger?.dispose();
 
         if (this.characterLoadUnit) {
             this.characterLoadUnit.dispose();
