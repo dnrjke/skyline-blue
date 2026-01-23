@@ -46,6 +46,7 @@ import { BlackHoleLogger } from '../debug/BlackHoleLogger';
 import { EnginePhysicalStateProbe } from '../debug/EnginePhysicalStateProbe';
 import { BlackHoleForensicProbe } from '../debug/BlackHoleForensicProbe';
 import { PhysicalReadyCaptureProbe } from '../debug/PhysicalReadyCaptureProbe';
+import { PhysicalReadyFlightRecorderProbe } from '../debug/PhysicalReadyFlightRecorderProbe';
 
 export interface NavigationSceneConfig {
     /** @deprecated Energy budget is no longer used in Phase 3 */
@@ -113,6 +114,9 @@ export class NavigationScene {
 
     // Debug: Capture Probe (raw physical state flight recorder for first-true edge)
     private captureProbe: PhysicalReadyCaptureProbe | null = null;
+
+    // Debug: Flight Recorder (JSON event timeline for frame-level analysis)
+    private flightRecorder: PhysicalReadyFlightRecorderProbe | null = null;
 
     private currentStage = { episode: 1, stage: 1 } as const;
     private startHooks: NavigationStartHooks | null = null;
@@ -194,6 +198,12 @@ export class NavigationScene {
             consoleOutput: true,
             ringBufferCapacity: 1800,    // 30s @ 60fps
             postTriggerFrames: 300,      // 5s @ 60fps
+        });
+
+        // Debug: Flight Recorder (JSON event timeline for problem root-cause)
+        this.flightRecorder = new PhysicalReadyFlightRecorderProbe(scene, {
+            maxDurationMs: 600_000,
+            consoleOutput: true,
         });
     }
 
@@ -436,6 +446,10 @@ export class NavigationScene {
                 this.captureProbe?.start();
                 this.captureProbe?.markPhase('ENGINE_AWAKENED_START');
 
+                // Start Flight Recorder: JSON event timeline from here
+                this.flightRecorder?.start();
+                this.flightRecorder?.markPhase('ENGINE_AWAKENED_START');
+
                 console.log('[ENGINE_AWAKENED] Starting two-phase barrier...');
                 hooks?.onLog?.('[ENGINE_AWAKENED] Phase 1: RAF burst, Phase 2: stable detection...');
 
@@ -491,6 +505,7 @@ export class NavigationScene {
                     firstFrameDelay: awakenedResult.firstFrameDelayMs,
                 });
                 this.captureProbe?.markPhase('ENGINE_AWAKENED_PASSED');
+                this.flightRecorder?.markPhase('ENGINE_AWAKENED_PASSED');
 
                 // ===== CAMERA TRANSITION (starts grid visibility animation) =====
                 // The camera transition controls hologram visibility (0→1 over 1.1s).
@@ -520,6 +535,7 @@ export class NavigationScene {
                 this.blackHoleLogger?.snapshotGPUState('POST_VISUAL_READY');
                 this.forensicProbe?.markPhase('VISUAL_READY_CONFIRMED', 'logical');
                 this.captureProbe?.markPhase('VISUAL_READY_CONFIRMED');
+                this.flightRecorder?.markPhase('VISUAL_READY_CONFIRMED');
 
                 // ===== READY =====
                 // Engine is confirmed awake. Natural frames are stable.
@@ -531,6 +547,7 @@ export class NavigationScene {
                 this.blackHoleLogger?.markPhase('READY_DECLARED');
                 this.forensicProbe?.markPhase('READY_DECLARED', 'logical');
                 this.captureProbe?.markPhase('READY_DECLARED');
+                this.flightRecorder?.markPhase('READY_DECLARED');
 
                 // Start Physical State Probe: tracks canvas/engine/hwScale/resize
                 // from READY until PHYSICAL_READY_FRAME or timeout
@@ -605,6 +622,13 @@ export class NavigationScene {
                 // Capture Probe: mark normalization
                 // (probe continues to run until first-true + post-history, or timeout)
                 this.captureProbe?.markPhase('NORMALIZATION_COMPLETE');
+
+                // Flight Recorder: mark normalization and print summary
+                // (recorder continues until PHYSICAL_READY + post-record, or timeout)
+                this.flightRecorder?.markPhase('NORMALIZATION_COMPLETE');
+                if (this.flightRecorder?.isActive()) {
+                    this.flightRecorder.printSummary();
+                }
 
                 // Log summary to console for easy access
                 if (this.blackHoleLogger?.isActive() === false) {
@@ -887,6 +911,7 @@ export class NavigationScene {
         this.physicalStateProbe?.dispose();
         this.forensicProbe?.dispose();
         this.captureProbe?.dispose();
+        this.flightRecorder?.dispose();
 
         if (this.characterLoadUnit) {
             this.characterLoadUnit.dispose();

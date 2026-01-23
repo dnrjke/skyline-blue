@@ -45,3 +45,18 @@ export type {
     CaptureReport,
     CaptureProbeConfig,
 } from './PhysicalReadyCaptureProbe';
+
+export { PhysicalReadyFlightRecorderProbe } from './PhysicalReadyFlightRecorderProbe';
+export type {
+    FlightEventType,
+    AnomalyType,
+    PhysicalProbeEvent,
+    FlightResizeEvent,
+    AnomalyOpenEvent,
+    AnomalyCloseEvent,
+    StarvationEnterEvent,
+    StarvationExitEvent,
+    PhysicalReadyEvent,
+    FlightEvent,
+    FlightRecorderConfig,
+} from './PhysicalReadyFlightRecorderProbe';
