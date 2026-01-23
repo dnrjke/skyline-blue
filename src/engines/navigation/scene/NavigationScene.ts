@@ -43,7 +43,7 @@ import {
 import { CharacterLoadUnit, type FlightAnimationRole } from '../loading/CharacterLoadUnit';
 
 // Debug: Render Desync Investigation
-import { RenderDesyncProbe, markVisualReadyTimestamp } from '../debug/RenderDesyncProbe';
+import { RenderDesyncProbe, markVisualReadyTimestamp, validateAcceptanceCriteria } from '../debug/RenderDesyncProbe';
 
 export interface NavigationSceneConfig {
     /** @deprecated Energy budget is no longer used in Phase 3 */
@@ -374,9 +374,12 @@ export class NavigationScene {
                 throw result.error ?? new Error('Loading failed');
             }
 
-            // ===== ENGINE_AWAKENED_BARRIER =====
+            // ===== ENGINE_AWAKENED_BARRIER (HARD GATE) =====
             // PREREQUISITE for READY — must pass before any UX action.
             // Flow: VISUAL_READY → ENGINE_AWAKENED → READY → UX_READY
+            //
+            // ⚠️ This is a HARD GATE. If it fails, READY is NEVER declared.
+            // There is no "degraded confidence" path.
             if (result.phase === LoadingPhase.READY) {
                 console.log('[ENGINE_AWAKENED] Waiting for stable render loop...');
                 hooks?.onLog?.('[ENGINE_AWAKENED] Verifying render loop stability...');
@@ -385,18 +388,58 @@ export class NavigationScene {
                     minConsecutiveFrames: 3,
                     maxAllowedFrameGapMs: 50,
                     maxWaitMs: 3000,
+                    maxKickAttempts: 3,
+                    kickIntervalMs: 100,
                     debug: true,
                 });
 
                 if (!awakenedResult.passed) {
-                    console.warn('[ENGINE_AWAKENED] Barrier timeout — proceeding with degraded confidence');
-                    hooks?.onLog?.('[ENGINE_AWAKENED] Warning: barrier timeout');
+                    // HARD FAIL — engine never achieved stable rendering
+                    console.error(
+                        '[ENGINE_AWAKENED] ✗ HARD GATE FAILED. READY will NOT be declared.',
+                        `frames=${awakenedResult.framesRendered}, ` +
+                        `stable=${awakenedResult.stableFrameCount}, ` +
+                        `firstFrameDelay=${awakenedResult.firstFrameDelayMs.toFixed(1)}ms, ` +
+                        `timedOut=${awakenedResult.timedOut}`
+                    );
+                    hooks?.onLog?.('[ENGINE_AWAKENED] ✗ HARD FAIL — render loop unstable');
+                    throw new Error(
+                        `ENGINE_AWAKENED barrier failed: ${awakenedResult.framesRendered} frames, ` +
+                        `${awakenedResult.stableFrameCount} stable (need ${3})`
+                    );
+                }
+
+                // ===== ACCEPTANCE CRITERIA VALIDATION =====
+                // Verify first frame delay meets acceptance threshold
+                if (awakenedResult.firstFrameDelayMs > 50) {
+                    console.warn(
+                        `[ENGINE_AWAKENED] ⚠️ First frame delay ${awakenedResult.firstFrameDelayMs.toFixed(1)}ms > 50ms threshold. ` +
+                        `RAF was slow to start (kicks=${awakenedResult.kicksRequired}).`
+                    );
+                    hooks?.onLog?.(
+                        `[ENGINE_AWAKENED] ⚠️ First frame delay: ${Math.round(awakenedResult.firstFrameDelayMs)}ms`
+                    );
                 }
 
                 // ===== READY =====
-                // Engine is confirmed awake. Now safe to start visual transitions.
-                console.log('[READY] Engine awakened confirmed. Starting camera transition...');
-                hooks?.onLog?.('[READY] View stabilized — camera transition starting');
+                // Engine is confirmed awake and stable. Now safe to start visual transitions.
+                // At this point: RAF is running, frames are stable, firstBeforeRender has occurred.
+
+                // Mark READY timestamp for probe validation
+                this.renderDesyncProbe?.markReadyDeclared();
+
+                console.log(
+                    `[READY] Engine confirmed awake: ` +
+                    `${awakenedResult.stableFrameCount} stable frames, ` +
+                    `avg dt=${awakenedResult.avgFrameIntervalMs.toFixed(1)}ms, ` +
+                    `first frame delay=${awakenedResult.firstFrameDelayMs.toFixed(1)}ms`
+                );
+                hooks?.onLog?.('[READY] Render loop stable — camera transition starting');
+
+                // Validate acceptance criteria (diagnostic — does not block)
+                if (this.renderDesyncProbe) {
+                    validateAcceptanceCriteria(this.renderDesyncProbe);
+                }
 
                 // Camera transition starts at READY (not before)
                 this.cameraController.transitionIn(LAYOUT.HOLOGRAM.GRID_SIZE / 2, () => {
