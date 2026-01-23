@@ -43,6 +43,7 @@ import { CharacterLoadUnit, type FlightAnimationRole } from '../loading/Characte
 // Debug: Render Desync Investigation
 import { RenderDesyncProbe, markVisualReadyTimestamp, validateAcceptanceCriteria } from '../debug/RenderDesyncProbe';
 import { BlackHoleLogger } from '../debug/BlackHoleLogger';
+import { EnginePhysicalStateProbe } from '../debug/EnginePhysicalStateProbe';
 
 export interface NavigationSceneConfig {
     /** @deprecated Energy budget is no longer used in Phase 3 */
@@ -102,6 +103,9 @@ export class NavigationScene {
     // Debug: BlackHole Logger (ultra-precision READY→normalization gap tracker)
     private blackHoleLogger: BlackHoleLogger | null = null;
 
+    // Debug: Physical State Probe (Resize Black Hole dissection)
+    private physicalStateProbe: EnginePhysicalStateProbe | null = null;
+
     private currentStage = { episode: 1, stage: 1 } as const;
     private startHooks: NavigationStartHooks | null = null;
     private config: NavigationSceneConfig;
@@ -160,6 +164,13 @@ export class NavigationScene {
             meshSampleInterval: 5,
             autoStopMs: 300_000,
             consoleStalls: true,
+        });
+
+        // Debug: Create Physical State Probe (canvas/engine size dissection)
+        this.physicalStateProbe = new EnginePhysicalStateProbe(scene, {
+            maxDurationMs: 600_000,   // 10min max
+            snapshotInterval: 10,     // Every 10 frames
+            consoleOutput: true,
         });
     }
 
@@ -481,6 +492,10 @@ export class NavigationScene {
                 this.renderDesyncProbe?.markReadyDeclared();
                 this.blackHoleLogger?.markPhase('READY_DECLARED');
 
+                // Start Physical State Probe: tracks canvas/engine/hwScale/resize
+                // from READY until PHYSICAL_READY_FRAME or timeout
+                this.physicalStateProbe?.start();
+
                 console.log(
                     `[READY] Engine confirmed awake: ` +
                     `${awakenedResult.stableFrameCount} stable natural frames, ` +
@@ -532,6 +547,12 @@ export class NavigationScene {
                 this.blackHoleLogger?.snapshotGPUState('POST_UX_READY');
                 this.blackHoleLogger?.markPhase('NORMALIZATION_COMPLETE');
                 this.blackHoleLogger?.stop();
+
+                // Physical State Probe: print analysis at normalization
+                // (probe continues running for extended monitoring — auto-stops at maxDurationMs)
+                if (this.physicalStateProbe?.isActive()) {
+                    this.physicalStateProbe.printAnalysis();
+                }
 
                 // Log summary to console for easy access
                 if (this.blackHoleLogger?.isActive() === false) {
@@ -811,6 +832,7 @@ export class NavigationScene {
         // Debug: Dispose probe and logger
         this.renderDesyncProbe?.dispose();
         this.blackHoleLogger?.dispose();
+        this.physicalStateProbe?.dispose();
 
         if (this.characterLoadUnit) {
             this.characterLoadUnit.dispose();
