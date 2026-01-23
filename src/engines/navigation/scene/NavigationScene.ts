@@ -28,8 +28,6 @@ import {
     MaterialWarmupUnit,
     RenderReadyBarrierUnit,
     BarrierRequirement,
-    VisualReadyUnit,
-    createTacticalGridVisualRequirement,
     waitForEngineAwakened,
     type LoadUnit,
 } from '../../../core/loading';
@@ -272,11 +270,9 @@ export class NavigationScene {
                 onStateChange: (state) => {
                     this.currentPhase = state.phase;
                     hooks?.onProgress?.(state.progress);
-
-                    // Debug: Mark VISUAL_READY timestamp for probe
-                    if (state.phase === LoadingPhase.VISUAL_READY) {
-                        markVisualReadyTimestamp();
-                    }
+                    // NOTE: markVisualReadyTimestamp() is NOT called here.
+                    // VISUAL_READY is now verified AFTER ENGINE_AWAKENED barrier
+                    // (post-burst, natural RAF frame with TacticalGrid in frustum).
                 },
                 onUnitStart: (unitId, displayName) => {
                     hooks?.onLog?.(`Loading: ${displayName ?? unitId}...`);
@@ -330,13 +326,9 @@ export class NavigationScene {
                     ],
                 }),
 
-                // VISUAL_READY phase
-                new VisualReadyUnit('nav-visual-ready', {
-                    displayName: 'TacticalGrid Visual Verification',
-                    requirements: [
-                        createTacticalGridVisualRequirement(),
-                    ],
-                }),
+                // NOTE: VisualReadyUnit is deliberately NOT registered here.
+                // VISUAL_READY verification is performed AFTER ENGINE_AWAKENED barrier,
+                // ensuring TacticalGrid is confirmed in a NATURAL RAF frame (not forced burst).
             ];
 
             // Add character unit if configured
@@ -426,8 +418,17 @@ export class NavigationScene {
                     );
                 }
 
+                // ===== VISUAL_READY v2 (Post-Burst Natural Frame Verification) =====
+                // Wait for TacticalGrid to be confirmed in a NATURAL onBeforeRender→onAfterRender cycle.
+                // This replaces the orchestrator-based VisualReadyUnit which fired during forced frames.
+                console.log('[VISUAL_READY v2] Waiting for TacticalGrid in natural frame...');
+                hooks?.onLog?.('[VISUAL_READY v2] Verifying TacticalGrid in natural RAF frame...');
+
+                await this.waitForNaturalVisualReady();
+
                 // ===== READY =====
                 // Engine is confirmed awake. Natural frames are stable.
+                // VISUAL_READY confirmed: TacticalGrid rendered in natural frame.
                 // At this point: RAF is running, 3+ consecutive stable natural frames confirmed.
 
                 // Mark READY timestamp for probe validation
@@ -544,6 +545,106 @@ export class NavigationScene {
             cameraRadius: camera?.radius ?? 0,
             engineWidth: engine.getRenderWidth(),
             engineHeight: engine.getRenderHeight(),
+        });
+    }
+
+    /**
+     * VISUAL_READY v2: Post-burst natural-frame TacticalGrid verification.
+     *
+     * Definition:
+     *   VISUAL_READY = "자연 RAF 루프에 의해 onBeforeRender → onAfterRender 사이클이
+     *   실제로 실행되었고, 그 프레임에서 TacticalGrid가 카메라 frustum 내에서 렌더됨"
+     *
+     * This MUST be called AFTER ENGINE_AWAKENED barrier passes (natural frames are stable).
+     * It confirms TacticalGrid is visible in a NATURAL frame, then marks VISUAL_READY.
+     *
+     * @throws Error if TacticalGrid is not rendered within timeout
+     */
+    private waitForNaturalVisualReady(): Promise<void> {
+        return new Promise<void>((resolve, reject) => {
+            const maxWaitMs = 3000;
+            const startTime = performance.now();
+            let beforeRenderSeen = false;
+            let beforeRenderObserver: BABYLON.Nullable<BABYLON.Observer<BABYLON.Scene>> = null;
+            let afterRenderObserver: BABYLON.Nullable<BABYLON.Observer<BABYLON.Scene>> = null;
+            let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+            const cleanup = () => {
+                if (beforeRenderObserver) {
+                    this.scene.onBeforeRenderObservable.remove(beforeRenderObserver);
+                    beforeRenderObserver = null;
+                }
+                if (afterRenderObserver) {
+                    this.scene.onAfterRenderObservable.remove(afterRenderObserver);
+                    afterRenderObserver = null;
+                }
+                if (timeoutId !== null) {
+                    clearTimeout(timeoutId);
+                    timeoutId = null;
+                }
+            };
+
+            // Timeout: hard fail
+            timeoutId = setTimeout(() => {
+                cleanup();
+                reject(new Error(
+                    `[VISUAL_READY v2] FAILED: TacticalGrid not rendered in natural frame ` +
+                    `within ${maxWaitMs}ms after ENGINE_AWAKENED`
+                ));
+            }, maxWaitMs);
+
+            // Phase 1: Detect natural onBeforeRender
+            beforeRenderObserver = this.scene.onBeforeRenderObservable.add(() => {
+                beforeRenderSeen = true;
+            });
+
+            // Phase 2: After render, verify TacticalGrid in frustum
+            afterRenderObserver = this.scene.onAfterRenderObservable.add(() => {
+                if (!beforeRenderSeen) return; // Not a complete cycle yet
+
+                const mesh = this.scene.getMeshByName('TacticalGrid');
+                if (!mesh || mesh.isDisposed()) return;
+                if (!mesh.isEnabled() || !mesh.isVisible) return;
+
+                const camera = this.scene.activeCamera;
+                if (!camera) return;
+
+                const boundingInfo = mesh.getBoundingInfo();
+                if (!boundingInfo) return;
+
+                // Frustum check
+                const frustumPlanes =
+                    (camera as BABYLON.Camera & { _getFrustumPlanes?: () => BABYLON.Plane[] })._getFrustumPlanes?.()
+                    ?? this.scene.frustumPlanes;
+
+                if (!frustumPlanes || frustumPlanes.length === 0) return;
+
+                let inFrustum = false;
+                try {
+                    inFrustum = boundingInfo.isInFrustum(frustumPlanes);
+                } catch {
+                    // Fallback: check activeMeshes
+                    const activeMeshes = this.scene.getActiveMeshes();
+                    inFrustum = activeMeshes.data.includes(mesh);
+                }
+
+                if (inFrustum) {
+                    const elapsed = performance.now() - startTime;
+                    cleanup();
+
+                    // Mark VISUAL_READY: confirmed in natural frame
+                    markVisualReadyTimestamp();
+
+                    console.log(
+                        `[VISUAL_READY v2] ✓ TacticalGrid rendered in natural RAF frame ` +
+                        `(${elapsed.toFixed(1)}ms after ENGINE_AWAKENED)`
+                    );
+                    resolve();
+                }
+
+                // Reset for next frame attempt
+                beforeRenderSeen = false;
+            });
         });
     }
 
