@@ -1,34 +1,38 @@
 /**
- * EngineAwakenedBarrier - Verifies actual RAF/render loop is ticking
+ * EngineAwakenedBarrier - Verifies actual RAF/render loop is ticking STABLY
+ *
+ * ⚠️ CRITICAL: This barrier MUST pass BEFORE READY is declared.
  *
  * Purpose:
- * READY declaration means "logical loading complete", but does NOT guarantee
- * that the render loop is actually running and producing frames.
+ * READY should only be declared when the engine is "awake" - meaning:
+ * 1. RAF is scheduling frames consistently
+ * 2. Frame intervals are stable (no dt spikes)
+ * 3. Multiple consecutive STABLE frames have rendered
  *
- * This barrier verifies that:
- * 1. RAF is scheduling frames
- * 2. scene.onBeforeRender is being called
- * 3. Multiple consecutive frames have rendered (not just one)
- *
- * Only after this barrier passes should loading UI be removed.
+ * Pass Conditions (ALL must be met):
+ * - N consecutive frames rendered (default: 3)
+ * - Each frame interval < maxAllowedFrameGapMs (default: 50ms)
+ * - Total elapsed time < maxWaitMs (timeout failsafe)
  *
  * Why this matters:
  * - Babylon engine may have render loop registered but not ticking
- * - Browser RAF may be throttled/delayed based on visibility
+ * - First frame dt often spikes to 100ms+ (cold start)
+ * - Browser RAF may be throttled based on visibility
  * - DevTools open/close affects RAF timing
- * - First render frame may be significantly delayed after READY
  *
  * This is NOT about:
- * - Camera attachment (already handled elsewhere)
- * - Resize events (unreliable trigger)
- * - activeMeshes count (not a visibility guarantee)
+ * - Camera attachment (handled separately)
+ * - Resize events (unreliable)
+ * - activeMeshes count (not visibility guarantee)
  */
 
 import * as BABYLON from '@babylonjs/core';
 
 export interface EngineAwakenedConfig {
-    /** Minimum consecutive frames required (default: 3) */
+    /** Minimum consecutive STABLE frames required (default: 3) */
     minConsecutiveFrames?: number;
+    /** Maximum allowed frame gap in ms (default: 50) */
+    maxAllowedFrameGapMs?: number;
     /** Maximum wait time in ms before timeout (default: 3000) */
     maxWaitMs?: number;
     /** Enable debug logging */
@@ -38,26 +42,27 @@ export interface EngineAwakenedConfig {
 export interface EngineAwakenedResult {
     /** Whether the barrier passed successfully */
     passed: boolean;
-    /** Number of frames that rendered */
+    /** Number of total frames rendered */
     framesRendered: number;
+    /** Number of consecutive stable frames */
+    stableFrameCount: number;
     /** Time taken in ms */
     elapsedMs: number;
     /** Whether it timed out */
     timedOut: boolean;
+    /** Average frame interval of stable frames */
+    avgFrameIntervalMs: number;
+    /** Max frame interval observed */
+    maxFrameIntervalMs: number;
 }
 
 /**
- * EngineAwakenedBarrier - Wait for actual render loop activity
+ * EngineAwakenedBarrier - Wait for STABLE render loop activity
  *
- * Usage:
- * ```typescript
- * // After READY is declared
- * const barrier = new EngineAwakenedBarrier(scene);
- * const result = await barrier.wait();
- * if (result.passed) {
- *   // Safe to remove loading UI
- * }
- * ```
+ * NEW FLOW (required):
+ *   VISUAL_READY → ENGINE_AWAKENED → READY → UX_READY
+ *
+ * ENGINE_AWAKENED is a PREREQUISITE for READY, not a post-check.
  */
 export class EngineAwakenedBarrier {
     private scene: BABYLON.Scene;
@@ -68,13 +73,14 @@ export class EngineAwakenedBarrier {
         this.scene = scene;
         this.config = {
             minConsecutiveFrames: config.minConsecutiveFrames ?? 3,
+            maxAllowedFrameGapMs: config.maxAllowedFrameGapMs ?? 50,
             maxWaitMs: config.maxWaitMs ?? 3000,
             debug: config.debug ?? true,
         };
     }
 
     /**
-     * Wait for render loop to be confirmed active
+     * Wait for render loop to be confirmed STABLY active
      * Returns a promise that resolves when barrier passes or times out
      */
     async wait(): Promise<EngineAwakenedResult> {
@@ -83,14 +89,21 @@ export class EngineAwakenedBarrier {
                 resolve({
                     passed: false,
                     framesRendered: 0,
+                    stableFrameCount: 0,
                     elapsedMs: 0,
                     timedOut: false,
+                    avgFrameIntervalMs: 0,
+                    maxFrameIntervalMs: 0,
                 });
                 return;
             }
 
             const startTime = performance.now();
-            let frameCount = 0;
+            let totalFrameCount = 0;
+            let consecutiveStableFrames = 0;
+            let lastFrameTime = startTime;
+            let stableFrameIntervals: number[] = [];
+            let maxFrameInterval = 0;
             let observer: BABYLON.Nullable<BABYLON.Observer<BABYLON.Scene>> = null;
             let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
@@ -109,25 +122,34 @@ export class EngineAwakenedBarrier {
                 const elapsedMs = performance.now() - startTime;
                 cleanup();
 
+                const avgFrameIntervalMs = stableFrameIntervals.length > 0
+                    ? stableFrameIntervals.reduce((a, b) => a + b, 0) / stableFrameIntervals.length
+                    : 0;
+
                 const result: EngineAwakenedResult = {
                     passed,
-                    framesRendered: frameCount,
+                    framesRendered: totalFrameCount,
+                    stableFrameCount: consecutiveStableFrames,
                     elapsedMs,
                     timedOut,
+                    avgFrameIntervalMs,
+                    maxFrameIntervalMs: maxFrameInterval,
                 };
 
                 if (this.config.debug) {
                     if (passed) {
                         console.log(
-                            `[ENGINE_AWAKENED] ✓ Barrier passed: ${frameCount} frames in ${elapsedMs.toFixed(1)}ms`
+                            `[ENGINE_AWAKENED] ✓ Barrier PASSED: ${consecutiveStableFrames} stable frames, ` +
+                            `avg dt=${avgFrameIntervalMs.toFixed(1)}ms, elapsed=${elapsedMs.toFixed(1)}ms`
                         );
                     } else if (timedOut) {
                         console.warn(
-                            `[ENGINE_AWAKENED] ⚠️ Barrier TIMEOUT: only ${frameCount} frames in ${elapsedMs.toFixed(1)}ms`
+                            `[ENGINE_AWAKENED] ⚠️ TIMEOUT: ${totalFrameCount} total, ${consecutiveStableFrames} stable, ` +
+                            `maxDt=${maxFrameInterval.toFixed(1)}ms, elapsed=${elapsedMs.toFixed(1)}ms`
                         );
                     } else {
                         console.warn(
-                            `[ENGINE_AWAKENED] ⚠️ Barrier failed: ${frameCount} frames`
+                            `[ENGINE_AWAKENED] ⚠️ FAILED: unstable frames detected`
                         );
                     }
                 }
@@ -137,28 +159,51 @@ export class EngineAwakenedBarrier {
 
             // Set timeout failsafe
             timeoutId = setTimeout(() => {
-                complete(frameCount >= this.config.minConsecutiveFrames, true);
+                // On timeout, pass if we have at least 1 stable frame (graceful degradation)
+                complete(consecutiveStableFrames >= 1, true);
             }, this.config.maxWaitMs);
 
             // Monitor render frames
             if (this.config.debug) {
                 console.log(
-                    `[ENGINE_AWAKENED] Waiting for ${this.config.minConsecutiveFrames} consecutive frames...`
+                    `[ENGINE_AWAKENED] Waiting for ${this.config.minConsecutiveFrames} consecutive stable frames ` +
+                    `(dt < ${this.config.maxAllowedFrameGapMs}ms)...`
                 );
             }
 
             observer = this.scene.onBeforeRenderObservable.add(() => {
-                frameCount++;
+                const now = performance.now();
+                const frameInterval = now - lastFrameTime;
+                lastFrameTime = now;
 
-                if (this.config.debug && frameCount <= 5) {
-                    const elapsed = performance.now() - startTime;
-                    console.log(
-                        `[ENGINE_AWAKENED] Frame ${frameCount} at +${elapsed.toFixed(1)}ms`
-                    );
+                totalFrameCount++;
+                maxFrameInterval = Math.max(maxFrameInterval, frameInterval);
+
+                // Check if this frame interval is stable
+                const isStable = frameInterval < this.config.maxAllowedFrameGapMs;
+
+                if (isStable) {
+                    consecutiveStableFrames++;
+                    stableFrameIntervals.push(frameInterval);
+
+                    if (this.config.debug && totalFrameCount <= 10) {
+                        console.log(
+                            `[ENGINE_AWAKENED] Frame ${totalFrameCount}: dt=${frameInterval.toFixed(1)}ms ✓ stable (${consecutiveStableFrames}/${this.config.minConsecutiveFrames})`
+                        );
+                    }
+                } else {
+                    // Unstable frame - reset consecutive counter
+                    if (this.config.debug) {
+                        console.warn(
+                            `[ENGINE_AWAKENED] Frame ${totalFrameCount}: dt=${frameInterval.toFixed(1)}ms ⚠️ SPIKE - resetting counter`
+                        );
+                    }
+                    consecutiveStableFrames = 0;
+                    stableFrameIntervals = [];
                 }
 
-                // Check if we have enough consecutive frames
-                if (frameCount >= this.config.minConsecutiveFrames) {
+                // Check if we have enough consecutive stable frames
+                if (consecutiveStableFrames >= this.config.minConsecutiveFrames) {
                     complete(true);
                 }
             });
@@ -178,7 +223,7 @@ export class EngineAwakenedBarrier {
  *
  * @param scene - Babylon scene
  * @param options - Configuration options
- * @returns Promise that resolves when engine is confirmed awake
+ * @returns Promise that resolves when engine is confirmed STABLY awake
  */
 export async function waitForEngineAwakened(
     scene: BABYLON.Scene,
