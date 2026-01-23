@@ -33,3 +33,15 @@ export type {
     ForensicReport,
     ForensicProbeConfig,
 } from './BlackHoleForensicProbe';
+
+export { PhysicalReadyCaptureProbe } from './PhysicalReadyCaptureProbe';
+export type {
+    CaptureFrame,
+    CaptureResizeEvent,
+    CapturePhysicalSnapshot,
+    FirstTrueEdge,
+    PhysicalReadyConditionValues,
+    ConditionFlappingAnalysis,
+    CaptureReport,
+    CaptureProbeConfig,
+} from './PhysicalReadyCaptureProbe';

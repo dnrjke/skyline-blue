@@ -45,6 +45,7 @@ import { RenderDesyncProbe, markVisualReadyTimestamp, validateAcceptanceCriteria
 import { BlackHoleLogger } from '../debug/BlackHoleLogger';
 import { EnginePhysicalStateProbe } from '../debug/EnginePhysicalStateProbe';
 import { BlackHoleForensicProbe } from '../debug/BlackHoleForensicProbe';
+import { PhysicalReadyCaptureProbe } from '../debug/PhysicalReadyCaptureProbe';
 
 export interface NavigationSceneConfig {
     /** @deprecated Energy budget is no longer used in Phase 3 */
@@ -109,6 +110,9 @@ export class NavigationScene {
 
     // Debug: Forensic Probe (postmortem-level physical state timeline)
     private forensicProbe: BlackHoleForensicProbe | null = null;
+
+    // Debug: Capture Probe (raw physical state flight recorder for first-true edge)
+    private captureProbe: PhysicalReadyCaptureProbe | null = null;
 
     private currentStage = { episode: 1, stage: 1 } as const;
     private startHooks: NavigationStartHooks | null = null;
@@ -182,6 +186,14 @@ export class NavigationScene {
             maxDurationMs: 600_000,
             consoleOutput: true,
             convergenceSampleInterval: 30,
+        });
+
+        // Debug: Capture Probe (raw physical state flight recorder)
+        this.captureProbe = new PhysicalReadyCaptureProbe(scene, {
+            maxDurationMs: 600_000,
+            consoleOutput: true,
+            ringBufferCapacity: 1800,    // 30s @ 60fps
+            postTriggerFrames: 300,      // 5s @ 60fps
         });
     }
 
@@ -420,6 +432,10 @@ export class NavigationScene {
                 this.forensicProbe?.start();
                 this.forensicProbe?.markPhase('ENGINE_AWAKENED_START', 'logical');
 
+                // Start Capture Probe: raw physical state flight recorder
+                this.captureProbe?.start();
+                this.captureProbe?.markPhase('ENGINE_AWAKENED_START');
+
                 console.log('[ENGINE_AWAKENED] Starting two-phase barrier...');
                 hooks?.onLog?.('[ENGINE_AWAKENED] Phase 1: RAF burst, Phase 2: stable detection...');
 
@@ -474,6 +490,7 @@ export class NavigationScene {
                     stableFrames: awakenedResult.stableFrameCount,
                     firstFrameDelay: awakenedResult.firstFrameDelayMs,
                 });
+                this.captureProbe?.markPhase('ENGINE_AWAKENED_PASSED');
 
                 // ===== CAMERA TRANSITION (starts grid visibility animation) =====
                 // The camera transition controls hologram visibility (0→1 over 1.1s).
@@ -502,6 +519,7 @@ export class NavigationScene {
                 this.blackHoleLogger?.markPhase('VISUAL_READY_CONFIRMED');
                 this.blackHoleLogger?.snapshotGPUState('POST_VISUAL_READY');
                 this.forensicProbe?.markPhase('VISUAL_READY_CONFIRMED', 'logical');
+                this.captureProbe?.markPhase('VISUAL_READY_CONFIRMED');
 
                 // ===== READY =====
                 // Engine is confirmed awake. Natural frames are stable.
@@ -512,6 +530,7 @@ export class NavigationScene {
                 this.renderDesyncProbe?.markReadyDeclared();
                 this.blackHoleLogger?.markPhase('READY_DECLARED');
                 this.forensicProbe?.markPhase('READY_DECLARED', 'logical');
+                this.captureProbe?.markPhase('READY_DECLARED');
 
                 // Start Physical State Probe: tracks canvas/engine/hwScale/resize
                 // from READY until PHYSICAL_READY_FRAME or timeout
@@ -582,6 +601,10 @@ export class NavigationScene {
                 if (this.forensicProbe?.isActive()) {
                     this.forensicProbe.printReport();
                 }
+
+                // Capture Probe: mark normalization
+                // (probe continues to run until first-true + post-history, or timeout)
+                this.captureProbe?.markPhase('NORMALIZATION_COMPLETE');
 
                 // Log summary to console for easy access
                 if (this.blackHoleLogger?.isActive() === false) {
@@ -863,6 +886,7 @@ export class NavigationScene {
         this.blackHoleLogger?.dispose();
         this.physicalStateProbe?.dispose();
         this.forensicProbe?.dispose();
+        this.captureProbe?.dispose();
 
         if (this.characterLoadUnit) {
             this.characterLoadUnit.dispose();
