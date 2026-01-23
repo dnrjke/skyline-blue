@@ -59,4 +59,8 @@ export type {
     PhysicalReadyEvent,
     FlightEvent,
     FlightRecorderConfig,
+    ConditionFailAnalysis,
+    StarvationSummary,
+    ResizeContext,
+    DiagnosticSummary,
 } from './PhysicalReadyFlightRecorderProbe';

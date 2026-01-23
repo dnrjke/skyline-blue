@@ -73,15 +73,27 @@ export type FlightEventType =
 
 export type AnomalyType = 'RAF_FREQUENCY_LOCK' | 'CANVAS_ENGINE_MISMATCH' | 'DPR_DESYNC';
 
+/** RAF_SLOW threshold: frames slower than this are flagged */
+const RAF_SLOW_THRESHOLD_MS = 50; // >50ms = notably slow
+
 /**
  * PhysicalProbeEvent — Per-frame raw physical state.
- * Matches the required output format exactly.
+ * Includes C1~C8 condition booleans for per-frame fail analysis.
  */
 export interface PhysicalProbeEvent {
     type: 'PHYSICAL_PROBE';
     frame: number;
     t: number; // relative time in seconds (2 decimal precision)
     PHYSICAL_READY: boolean;
+    /** Per-condition boolean results */
+    C1: boolean; // Canvas buffer > 0
+    C2: boolean; // Engine/canvas size converged
+    C3: boolean; // RAF cadence stable
+    C4: boolean; // At least one resize occurred
+    C5: boolean; // Document visible
+    C6: boolean; // hwScale stable
+    C7: boolean; // DPR positive
+    C8: boolean; // No active anomalies
     canvas: {
         css: string;      // e.g. "1618x1282"
         buffer: string;   // e.g. "2427x1923"
@@ -91,9 +103,13 @@ export interface PhysicalProbeEvent {
     dpr: number;
     visibility: DocumentVisibilityState;
     rafDt: number;        // ms, 2 decimal
-    resizeGap: number;    // seconds since last resize, 0 if none
+    resizeGap: number;    // ms since last resize, -1 if none
+    mismatch: boolean;    // canvas/engine size mismatch
+    mismatchGapMs: number; // how long mismatch has persisted (ms), 0 if none
     anomalies: AnomalyType[];
     starvation: boolean;
+    stableFrames: number; // consecutive stable frames so far
+    rafSlow: boolean;     // true if rafDt > RAF_SLOW_THRESHOLD_MS
 }
 
 export interface FlightResizeEvent {
@@ -128,6 +144,12 @@ export interface StarvationEnterEvent {
     mismatchDurationMs: number;
     canvas: string;
     engine: string;
+    /** Mismatch reason: what exactly doesn't match */
+    mismatchReason: string;
+    /** Expected engine size (buffer / hwScale) */
+    expectedEngine: string;
+    hwScale: number;
+    dpr: number;
 }
 
 export interface StarvationExitEvent {
@@ -172,6 +194,60 @@ export interface FlightRecorderConfig {
     consoleOutput?: boolean;
     /** Max events stored (default: 200000) */
     maxEvents?: number;
+}
+
+// ============================================================
+// Diagnostic Summary Types
+// ============================================================
+
+export interface ConditionFailAnalysis {
+    condition: string;
+    failFrames: number;
+    totalFrames: number;
+    failPercent: number;
+    longestFailStreak: number;
+    firstFailFrame: number;
+    lastFailFrame: number;
+    failDurationMs: number;
+}
+
+export interface StarvationSummary {
+    enterFrame: number;
+    enterTime: number;
+    exitFrame: number;
+    exitTime: number;
+    durationMs: number;
+    mismatchReason: string;
+    resolvedBy: string;
+}
+
+export interface ResizeContext {
+    resizeFrame: number;
+    resizeTime: number;
+    source: string;
+    before: { buffer: string; engine: string; hwScale: number; dpr: number };
+    after: { buffer: string; engine: string; hwScale: number; dpr: number } | null;
+    preFrames: { frame: number; rafDt: number; buffer: string; engine: string; hwScale: number; dpr: number; mismatch: boolean }[];
+    postFrames: { frame: number; rafDt: number; buffer: string; engine: string; hwScale: number; dpr: number; mismatch: boolean }[];
+    mismatchResolvedAtFrame: number;
+}
+
+export interface DiagnosticSummary {
+    totalFrames: number;
+    totalDurationMs: number;
+    physicalReadyAchieved: boolean;
+    physicalReadyFrame: number;
+    physicalReadyTime: number;
+    conditionFails: ConditionFailAnalysis[];
+    starvationEvents: StarvationSummary[];
+    rafSlowFrameCount: number;
+    rafSlowStreaks: { startFrame: number; endFrame: number; maxDt: number; avgDt: number }[];
+    resizeCount: number;
+    resizeContexts: ResizeContext[];
+    mismatchFrameCount: number;
+    mismatchResolutions: { startFrame: number; endFrame: number; durationMs: number; resolvedByResize: boolean }[];
+    anomalyOpens: { frame: number; t: number; anomaly: AnomalyType; evidence: string }[];
+    anomalyCloses: { frame: number; t: number; anomaly: AnomalyType; durationMs: number }[];
 }
 
 // ============================================================
@@ -445,10 +521,16 @@ export class PhysicalReadyFlightRecorderProbe {
             this.recentRafDts.shift();
         }
 
-        // Resize gap
-        const resizeGap = this.lastResizeTime < 0
-            ? 0
-            : (now - this.lastResizeTime) / 1000;
+        // Resize gap (ms, -1 if no resize yet)
+        const resizeGapMs = this.lastResizeTime < 0
+            ? -1
+            : round2(now - this.lastResizeTime);
+
+        // Mismatch detection
+        const isMismatched = !this.checkSizeConverged(canvasBufW, canvasBufH, engineW, engineH, hwScale);
+        const mismatchGapMs = isMismatched && this.mismatchStartTime > 0
+            ? round2(now - this.mismatchStartTime)
+            : 0;
 
         // Run anomaly detection
         this.detectAnomalies(now, canvasBufW, canvasBufH, engineW, engineH, hwScale, dpr);
@@ -456,19 +538,30 @@ export class PhysicalReadyFlightRecorderProbe {
         // Run starvation detection
         this.detectStarvation(now, canvasBufW, canvasBufH, engineW, engineH, hwScale);
 
-        // Evaluate PHYSICAL_READY
-        const physReady = this.evaluatePhysicalReady(
+        // Evaluate PHYSICAL_READY (returns conditions + result)
+        const { ready: physReady, conditions } = this.evaluatePhysicalReadyDetailed(
             now, canvasBufW, canvasBufH, engineW, engineH,
             hwScale, dpr, rafDt, visibility, hasFocus
         );
 
-        // Emit PHYSICAL_PROBE event
+        // RAF slow flag
+        const rafSlow = rafDt > RAF_SLOW_THRESHOLD_MS;
+
+        // Emit PHYSICAL_PROBE event with full condition breakdown
         const activeAnomalies = Array.from(this.activeAnomalies.keys());
         const probeEvent: PhysicalProbeEvent = {
             type: 'PHYSICAL_PROBE',
             frame: this.frameIndex,
             t: this.toRelSec(now),
             PHYSICAL_READY: physReady,
+            C1: conditions[0],
+            C2: conditions[1],
+            C3: conditions[2],
+            C4: conditions[3],
+            C5: conditions[4],
+            C6: conditions[5],
+            C7: conditions[6],
+            C8: conditions[7],
             canvas: {
                 css: `${canvasCssW}x${canvasCssH}`,
                 buffer: `${canvasBufW}x${canvasBufH}`,
@@ -478,9 +571,13 @@ export class PhysicalReadyFlightRecorderProbe {
             dpr: round3(dpr),
             visibility,
             rafDt: round2(rafDt),
-            resizeGap: round2(resizeGap),
+            resizeGap: resizeGapMs,
+            mismatch: isMismatched,
+            mismatchGapMs,
             anomalies: activeAnomalies,
             starvation: this.isStarved,
+            stableFrames: this.consecutiveStable,
+            rafSlow,
         };
         this.pushEvent(probeEvent);
 
@@ -497,7 +594,7 @@ export class PhysicalReadyFlightRecorderProbe {
     // PHYSICAL_READY Evaluation (8 conditions + 500ms sustain)
     // ============================================================
 
-    private evaluatePhysicalReady(
+    private evaluatePhysicalReadyDetailed(
         now: number,
         canvasBufW: number, canvasBufH: number,
         engineW: number, engineH: number,
@@ -505,11 +602,13 @@ export class PhysicalReadyFlightRecorderProbe {
         rafDt: number,
         visibility: DocumentVisibilityState,
         hasFocus: boolean,
-    ): boolean {
-        if (this.physicalReadyConfirmed) return true;
+    ): { ready: boolean; conditions: boolean[] } {
+        if (this.physicalReadyConfirmed) {
+            return { ready: true, conditions: [true, true, true, true, true, true, true, true] };
+        }
 
         // 8 conditions (all must be true simultaneously)
-        const conditions = [
+        const conditions: boolean[] = [
             // C1: Canvas buffer > 0
             canvasBufW > 0 && canvasBufH > 0,
 
@@ -578,7 +677,7 @@ export class PhysicalReadyFlightRecorderProbe {
                     `stableFrames=${this.consecutiveStable}`
                 );
 
-                return true;
+                return { ready: true, conditions };
             }
         } else {
             // Reset
@@ -586,7 +685,7 @@ export class PhysicalReadyFlightRecorderProbe {
             this.physicalReadySustainStart = 0;
         }
 
-        return false;
+        return { ready: false, conditions };
     }
 
     private checkSizeConverged(
@@ -725,6 +824,13 @@ export class PhysicalReadyFlightRecorderProbe {
                 this.isStarved = true;
                 this.starvationEnterTime = now;
 
+                const expectedW = hwScale > 0 ? Math.round(canvasBufW / hwScale) : 0;
+                const expectedH = hwScale > 0 ? Math.round(canvasBufH / hwScale) : 0;
+                const diffW = Math.abs(engineW - expectedW);
+                const diffH = Math.abs(engineH - expectedH);
+                const reason = `engine(${engineW}x${engineH}) != expected(${expectedW}x${expectedH}) ` +
+                    `diff=(${diffW},${diffH}) buf=${canvasBufW}x${canvasBufH} hwScale=${hwScale}`;
+
                 const evt: StarvationEnterEvent = {
                     type: 'STARVATION_ENTER',
                     frame: this.frameIndex,
@@ -732,6 +838,10 @@ export class PhysicalReadyFlightRecorderProbe {
                     mismatchDurationMs: round2(mismatchDuration),
                     canvas: `${canvasBufW}x${canvasBufH}`,
                     engine: `${engineW}x${engineH}`,
+                    mismatchReason: reason,
+                    expectedEngine: `${expectedW}x${expectedH}`,
+                    hwScale,
+                    dpr: window.devicePixelRatio,
                 };
                 this.pushEvent(evt);
             }
@@ -764,9 +874,9 @@ export class PhysicalReadyFlightRecorderProbe {
     }
 
     /**
-     * Print a summary to console. For the full timeline, use getTimeline() or getTimelineJSON().
+     * Generate a diagnostic summary object for JSON export.
      */
-    printSummary(): void {
+    generateDiagnosticSummary(): DiagnosticSummary {
         const probeEvents = this.timeline.filter(e => e.type === 'PHYSICAL_PROBE') as PhysicalProbeEvent[];
         const resizeEvents = this.timeline.filter(e => e.type === 'RESIZE') as FlightResizeEvent[];
         const anomalyOpens = this.timeline.filter(e => e.type === 'ANOMALY_OPEN') as AnomalyOpenEvent[];
@@ -775,72 +885,287 @@ export class PhysicalReadyFlightRecorderProbe {
         const starvExits = this.timeline.filter(e => e.type === 'STARVATION_EXIT') as StarvationExitEvent[];
         const readyEvt = this.timeline.find(e => e.type === 'PHYSICAL_READY') as PhysicalReadyEvent | undefined;
 
-        console.group('[FlightRecorderProbe] SUMMARY');
-        console.log(`Total events: ${this.timeline.length} | Frames: ${this.frameIndex}`);
-        console.log(`Duration: ${((performance.now() - this.startTime) / 1000).toFixed(1)}s`);
-        console.log(`Resize events: ${resizeEvents.length} | Anomaly opens: ${anomalyOpens.length}`);
-        console.log(`Starvation entries: ${starvEnters.length}`);
+        // Per-condition fail analysis
+        const conditionNames = ['C1:CanvasBuf>0', 'C2:SizeConverged', 'C3:RAFStable', 'C4:ResizeOccurred', 'C5:Visible', 'C6:HwScaleStable', 'C7:DPR>0', 'C8:NoAnomalies'];
+        const conditionFails: ConditionFailAnalysis[] = conditionNames.map((name, i) => {
+            const key = `C${i + 1}` as keyof PhysicalProbeEvent;
+            let failFrames = 0;
+            let longestStreak = 0;
+            let currentStreak = 0;
+            let firstFailFrame = -1;
+            let lastFailFrame = -1;
 
-        if (readyEvt) {
-            console.group('★ PHYSICAL_READY');
-            console.log(`Achieved at frame=${readyEvt.frame} t=${readyEvt.t}s`);
-            console.log(`Sustained: ${readyEvt.sustainedMs}ms | Stable frames: ${readyEvt.stableFrames}`);
-            console.log('Values:', readyEvt.conditionValues);
-            console.groupEnd();
-        } else {
-            console.warn('PHYSICAL_READY was NEVER achieved.');
+            for (const e of probeEvents) {
+                const val = e[key] as boolean;
+                if (!val) {
+                    failFrames++;
+                    currentStreak++;
+                    if (firstFailFrame < 0) firstFailFrame = e.frame;
+                    lastFailFrame = e.frame;
+                    longestStreak = Math.max(longestStreak, currentStreak);
+                } else {
+                    currentStreak = 0;
+                }
+            }
 
-            // Show last 5 probe events for context
-            const last5 = probeEvents.slice(-5);
-            if (last5.length > 0) {
-                console.group('Last 5 frames:');
-                console.table(last5.map(e => ({
-                    frame: e.frame,
-                    t: `${e.t}s`,
-                    ready: e.PHYSICAL_READY,
-                    canvas: e.canvas.buffer,
-                    engine: e.canvas.engine,
-                    hwScale: e.hwScale,
-                    rafDt: `${e.rafDt}ms`,
-                    anomalies: e.anomalies.join(',') || 'none',
-                    starvation: e.starvation,
-                })));
-                console.groupEnd();
+            const failDurationMs = probeEvents.length > 0 && failFrames > 0
+                ? round2((probeEvents[lastFailFrame >= 0 ? Math.min(lastFailFrame, probeEvents.length - 1) : 0].t -
+                    probeEvents[firstFailFrame >= 0 ? Math.min(firstFailFrame, probeEvents.length - 1) : 0].t) * 1000)
+                : 0;
+
+            return {
+                condition: name,
+                failFrames,
+                totalFrames: probeEvents.length,
+                failPercent: probeEvents.length > 0 ? round2(failFrames / probeEvents.length * 100) : 0,
+                longestFailStreak: longestStreak,
+                firstFailFrame,
+                lastFailFrame,
+                failDurationMs,
+            };
+        });
+
+        // Starvation summary
+        const starvationSummary: StarvationSummary[] = starvEnters.map((enter, i) => {
+            const exit = starvExits[i];
+            return {
+                enterFrame: enter.frame,
+                enterTime: enter.t,
+                exitFrame: exit?.frame ?? -1,
+                exitTime: exit?.t ?? -1,
+                durationMs: exit ? round2(exit.totalStarvationMs) : -1,
+                mismatchReason: enter.mismatchReason,
+                resolvedBy: exit?.resolvedBy ?? 'unresolved',
+            };
+        });
+
+        // RAF_SLOW analysis: frames with rafDt > threshold
+        const rafSlowFrames = probeEvents.filter(e => e.rafSlow);
+        const rafSlowStreaks: { startFrame: number; endFrame: number; maxDt: number; avgDt: number }[] = [];
+        let streakStart = -1;
+        let streakDts: number[] = [];
+        for (let i = 0; i < probeEvents.length; i++) {
+            if (probeEvents[i].rafSlow) {
+                if (streakStart < 0) streakStart = probeEvents[i].frame;
+                streakDts.push(probeEvents[i].rafDt);
+            } else {
+                if (streakStart >= 0 && streakDts.length >= 2) {
+                    rafSlowStreaks.push({
+                        startFrame: streakStart,
+                        endFrame: probeEvents[i - 1].frame,
+                        maxDt: round2(Math.max(...streakDts)),
+                        avgDt: round2(streakDts.reduce((a, b) => a + b, 0) / streakDts.length),
+                    });
+                }
+                streakStart = -1;
+                streakDts = [];
+            }
+        }
+        if (streakStart >= 0 && streakDts.length >= 2) {
+            rafSlowStreaks.push({
+                startFrame: streakStart,
+                endFrame: probeEvents[probeEvents.length - 1].frame,
+                maxDt: round2(Math.max(...streakDts)),
+                avgDt: round2(streakDts.reduce((a, b) => a + b, 0) / streakDts.length),
+            });
+        }
+
+        // Resize context: 10 frames before and after each resize
+        const resizeContexts: ResizeContext[] = resizeEvents.map(rEvt => {
+            const preFrames = probeEvents
+                .filter(p => p.frame >= rEvt.frame - 10 && p.frame < rEvt.frame)
+                .map(p => ({ frame: p.frame, rafDt: p.rafDt, buffer: p.canvas.buffer, engine: p.canvas.engine, hwScale: p.hwScale, dpr: p.dpr, mismatch: p.mismatch }));
+            const postFrames = probeEvents
+                .filter(p => p.frame >= rEvt.frame && p.frame < rEvt.frame + 10)
+                .map(p => ({ frame: p.frame, rafDt: p.rafDt, buffer: p.canvas.buffer, engine: p.canvas.engine, hwScale: p.hwScale, dpr: p.dpr, mismatch: p.mismatch }));
+            const mismatchResolvedFrame = postFrames.find(p => !p.mismatch)?.frame ?? -1;
+
+            return {
+                resizeFrame: rEvt.frame,
+                resizeTime: rEvt.t,
+                source: rEvt.source,
+                before: rEvt.before,
+                after: rEvt.after,
+                preFrames,
+                postFrames,
+                mismatchResolvedAtFrame: mismatchResolvedFrame,
+            };
+        });
+
+        // Mismatch resolution analysis
+        const mismatchFrames = probeEvents.filter(p => p.mismatch);
+        const mismatchResolutions: { startFrame: number; endFrame: number; durationMs: number; resolvedByResize: boolean }[] = [];
+        let mmStart = -1;
+        let mmStartTime = 0;
+        for (let i = 0; i < probeEvents.length; i++) {
+            const p = probeEvents[i];
+            if (p.mismatch) {
+                if (mmStart < 0) { mmStart = p.frame; mmStartTime = p.t; }
+            } else {
+                if (mmStart >= 0) {
+                    const resolvedByResize = resizeEvents.some(r => r.frame >= mmStart && r.frame <= p.frame);
+                    mismatchResolutions.push({
+                        startFrame: mmStart,
+                        endFrame: p.frame,
+                        durationMs: round2((p.t - mmStartTime) * 1000),
+                        resolvedByResize,
+                    });
+                    mmStart = -1;
+                }
             }
         }
 
-        // Anomaly timeline
-        if (anomalyOpens.length > 0) {
-            console.group(`Anomaly Timeline (${anomalyOpens.length} opens, ${anomalyCloses.length} closes)`);
-            const anomalyEvents = [...anomalyOpens, ...anomalyCloses].sort((a, b) => a.t - b.t);
-            console.table(anomalyEvents.slice(0, 20).map(e => ({
+        return {
+            totalFrames: probeEvents.length,
+            totalDurationMs: probeEvents.length > 0
+                ? round2((probeEvents[probeEvents.length - 1].t - probeEvents[0].t) * 1000)
+                : 0,
+            physicalReadyAchieved: !!readyEvt,
+            physicalReadyFrame: readyEvt?.frame ?? -1,
+            physicalReadyTime: readyEvt?.t ?? -1,
+            conditionFails,
+            starvationEvents: starvationSummary,
+            rafSlowFrameCount: rafSlowFrames.length,
+            rafSlowStreaks,
+            resizeCount: resizeEvents.length,
+            resizeContexts: resizeContexts.slice(0, 20), // limit to first 20
+            mismatchFrameCount: mismatchFrames.length,
+            mismatchResolutions,
+            anomalyOpens: anomalyOpens.map(a => ({ frame: a.frame, t: a.t, anomaly: a.anomaly, evidence: a.evidence })),
+            anomalyCloses: anomalyCloses.map(a => ({ frame: a.frame, t: a.t, anomaly: a.anomaly, durationMs: a.durationMs })),
+        };
+    }
+
+    /**
+     * Print comprehensive diagnostic summary to console.
+     */
+    printSummary(): void {
+        const summary = this.generateDiagnosticSummary();
+        const probeEvents = this.timeline.filter(e => e.type === 'PHYSICAL_PROBE') as PhysicalProbeEvent[];
+
+        console.group('[FlightRecorderProbe] DIAGNOSTIC SUMMARY');
+        console.log(`Total: ${summary.totalFrames} frames, ${summary.totalDurationMs}ms`);
+        console.log(`PHYSICAL_READY: ${summary.physicalReadyAchieved ? `YES at frame=${summary.physicalReadyFrame} t=${summary.physicalReadyTime}s` : 'NEVER'}`);
+
+        // ---- Per-condition fail analysis ----
+        console.group('CONDITION FAIL ANALYSIS');
+        console.table(summary.conditionFails.map(c => ({
+            condition: c.condition,
+            failFrames: c.failFrames,
+            failPercent: `${c.failPercent}%`,
+            longestStreak: c.longestFailStreak,
+            firstFail: c.firstFailFrame,
+            lastFail: c.lastFailFrame,
+            failDuration: `${c.failDurationMs}ms`,
+        })));
+        console.groupEnd();
+
+        // ---- RAF_SLOW correlation ----
+        if (summary.rafSlowFrameCount > 0) {
+            console.group(`RAF_SLOW Analysis (${summary.rafSlowFrameCount} frames > ${RAF_SLOW_THRESHOLD_MS}ms)`);
+            if (summary.rafSlowStreaks.length > 0) {
+                console.table(summary.rafSlowStreaks.slice(0, 15).map(s => ({
+                    frames: `${s.startFrame}→${s.endFrame}`,
+                    length: s.endFrame - s.startFrame + 1,
+                    maxDt: `${s.maxDt}ms`,
+                    avgDt: `${s.avgDt}ms`,
+                })));
+            }
+
+            // Correlation: did RAF_SLOW prevent PHYSICAL_READY?
+            if (!summary.physicalReadyAchieved) {
+                const c3Fails = summary.conditionFails[2]; // C3: RAF stable
+                console.log(`C3(RAF stable) failed ${c3Fails.failFrames} frames (${c3Fails.failPercent}%) — ` +
+                    `longest streak: ${c3Fails.longestFailStreak} frames`);
+                console.log('>>> RAF_SLOW is likely a PRIMARY blocker for PHYSICAL_READY');
+            }
+            console.groupEnd();
+        }
+
+        // ---- Starvation analysis ----
+        if (summary.starvationEvents.length > 0) {
+            console.group(`STARVATION Events (${summary.starvationEvents.length})`);
+            console.table(summary.starvationEvents.map(s => ({
+                enter: `frame=${s.enterFrame} t=${s.enterTime}s`,
+                exit: s.exitFrame >= 0 ? `frame=${s.exitFrame} t=${s.exitTime}s` : 'UNRESOLVED',
+                duration: s.durationMs >= 0 ? `${s.durationMs}ms` : 'ongoing',
+                reason: s.mismatchReason,
+                resolvedBy: s.resolvedBy,
+            })));
+            console.groupEnd();
+        }
+
+        // ---- Resize context (pre/post 10 frames) ----
+        if (summary.resizeContexts.length > 0) {
+            console.group(`RESIZE Context (${summary.resizeCount} events, showing pre/post 10 frames)`);
+            for (const ctx of summary.resizeContexts.slice(0, 5)) {
+                console.group(`Resize at frame=${ctx.resizeFrame} t=${ctx.resizeTime}s source=${ctx.source}`);
+                console.log(`Before: ${ctx.before.buffer} eng=${ctx.before.engine} hw=${ctx.before.hwScale} dpr=${ctx.before.dpr}`);
+                console.log(`After:  ${ctx.after ? `${ctx.after.buffer} eng=${ctx.after.engine} hw=${ctx.after.hwScale} dpr=${ctx.after.dpr}` : 'pending'}`);
+                console.log(`Mismatch resolved at frame: ${ctx.mismatchResolvedAtFrame >= 0 ? ctx.mismatchResolvedAtFrame : 'NOT resolved in window'}`);
+                if (ctx.preFrames.length > 0 || ctx.postFrames.length > 0) {
+                    console.table([...ctx.preFrames, ...ctx.postFrames].map(f => ({
+                        frame: f.frame,
+                        rafDt: `${f.rafDt}ms`,
+                        buffer: f.buffer,
+                        engine: f.engine,
+                        hwScale: f.hwScale,
+                        mismatch: f.mismatch,
+                        marker: f.frame === ctx.resizeFrame ? '<<< RESIZE' : '',
+                    })));
+                }
+                console.groupEnd();
+            }
+            console.groupEnd();
+        }
+
+        // ---- Mismatch resolution ----
+        if (summary.mismatchResolutions.length > 0) {
+            console.group(`MISMATCH Resolution (${summary.mismatchResolutions.length} episodes, ${summary.mismatchFrameCount} total frames)`);
+            console.table(summary.mismatchResolutions.slice(0, 10).map(m => ({
+                frames: `${m.startFrame}→${m.endFrame}`,
+                duration: `${m.durationMs}ms`,
+                resolvedByResize: m.resolvedByResize,
+            })));
+            console.groupEnd();
+        }
+
+        // ---- Anomaly timeline ----
+        if (summary.anomalyOpens.length > 0) {
+            console.group(`ANOMALY Timeline (${summary.anomalyOpens.length} opens, ${summary.anomalyCloses.length} closes)`);
+            const allAnomalyEvts = [
+                ...summary.anomalyOpens.map(a => ({ ...a, evtType: 'OPEN' as const })),
+                ...summary.anomalyCloses.map(a => ({ ...a, evtType: 'CLOSE' as const })),
+            ].sort((a, b) => a.t - b.t);
+            console.table(allAnomalyEvts.slice(0, 20).map(e => ({
                 t: `${e.t}s`,
-                type: e.type,
+                type: e.evtType,
                 anomaly: e.anomaly,
-                detail: e.type === 'ANOMALY_OPEN'
-                    ? (e as AnomalyOpenEvent).evidence
-                    : `duration=${(e as AnomalyCloseEvent).durationMs}ms`,
+                detail: e.evtType === 'OPEN' ? (e as typeof summary.anomalyOpens[0] & { evtType: 'OPEN' }).evidence : `${(e as typeof summary.anomalyCloses[0] & { evtType: 'CLOSE' }).durationMs}ms`,
             })));
             console.groupEnd();
         }
 
-        // Starvation timeline
-        if (starvEnters.length > 0) {
-            console.group(`Starvation Timeline (${starvEnters.length} entries)`);
-            const starvEvents = [...starvEnters, ...starvExits].sort((a, b) => a.t - b.t);
-            console.table(starvEvents.map(e => ({
+        // ---- Final frames (for debugging never-achieved) ----
+        if (!summary.physicalReadyAchieved && probeEvents.length > 0) {
+            console.group('FINAL 10 FRAMES (PHYSICAL_READY never achieved)');
+            console.table(probeEvents.slice(-10).map(e => ({
+                frame: e.frame,
                 t: `${e.t}s`,
-                type: e.type,
-                detail: e.type === 'STARVATION_ENTER'
-                    ? `mismatch=${(e as StarvationEnterEvent).mismatchDurationMs}ms canvas=${(e as StarvationEnterEvent).canvas} engine=${(e as StarvationEnterEvent).engine}`
-                    : `total=${(e as StarvationExitEvent).totalStarvationMs}ms resolvedBy=${(e as StarvationExitEvent).resolvedBy}`,
+                C1: e.C1, C2: e.C2, C3: e.C3, C4: e.C4,
+                C5: e.C5, C6: e.C6, C7: e.C7, C8: e.C8,
+                rafDt: `${e.rafDt}ms`,
+                mismatch: e.mismatch,
+                starvation: e.starvation,
+                stable: e.stableFrames,
             })));
             console.groupEnd();
         }
 
-        // Make timeline available on window for extraction
+        // Store for extraction
         (window as unknown as Record<string, unknown>).__flightRecorderTimeline = this.timeline;
-        console.log('💾 Timeline stored at window.__flightRecorderTimeline (use JSON.stringify for export)');
+        (window as unknown as Record<string, unknown>).__flightRecorderSummary = summary;
+        console.log('Data stored: window.__flightRecorderTimeline (events), window.__flightRecorderSummary (analysis)');
 
         console.groupEnd();
     }
