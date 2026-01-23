@@ -419,9 +419,24 @@ export class NavigationScene {
                     );
                 }
 
+                // ===== CAMERA TRANSITION (starts grid visibility animation) =====
+                // The camera transition controls hologram visibility (0→1 over 1.1s).
+                // It MUST start BEFORE VISUAL_READY check so the grid becomes renderable.
+                // Without this, the grid has visibility=0 and never appears in activeMeshes.
+                console.log('[TRANSITION] Starting camera transition (grid fade-in)...');
+                hooks?.onLog?.('[TRANSITION] Camera + grid visibility animation starting...');
+
+                const transitionDone = new Promise<void>((resolveTransition) => {
+                    this.cameraController.transitionIn(LAYOUT.HOLOGRAM.GRID_SIZE / 2, () => {
+                        console.log('[TRANSITION] Camera transition complete');
+                        resolveTransition();
+                    });
+                });
+
                 // ===== VISUAL_READY v2 (Post-Burst Natural Frame Verification) =====
                 // Wait for TacticalGrid to be confirmed in a NATURAL onBeforeRender→onAfterRender cycle.
-                // This replaces the orchestrator-based VisualReadyUnit which fired during forced frames.
+                // The camera transition above has started animating visibility from 0→1,
+                // so the grid will appear in activeMeshes once visibility > 0.
                 console.log('[VISUAL_READY v2] Waiting for TacticalGrid in natural frame...');
                 hooks?.onLog?.('[VISUAL_READY v2] Verifying TacticalGrid in natural RAF frame...');
 
@@ -429,8 +444,8 @@ export class NavigationScene {
 
                 // ===== READY =====
                 // Engine is confirmed awake. Natural frames are stable.
-                // VISUAL_READY confirmed: TacticalGrid rendered in natural frame.
-                // At this point: RAF is running, 3+ consecutive stable natural frames confirmed.
+                // VISUAL_READY confirmed: TacticalGrid rendered in natural frame (visibility > 0).
+                // At this point: RAF is running, grid confirmed in activeMeshes.
 
                 // Mark READY timestamp for probe validation
                 this.renderDesyncProbe?.markReadyDeclared();
@@ -442,7 +457,7 @@ export class NavigationScene {
                     `first natural frame delay=${awakenedResult.firstFrameDelayMs.toFixed(1)}ms, ` +
                     `bursts=${awakenedResult.burstCount}`
                 );
-                hooks?.onLog?.('[READY] Natural render loop stable — camera transition starting');
+                hooks?.onLog?.('[READY] TacticalGrid rendered — waiting for transition...');
 
                 // Validate RenderDesyncProbe acceptance criteria (BLOCKING)
                 // If probe FAILS → READY is revoked, treated as loading failure
@@ -461,14 +476,14 @@ export class NavigationScene {
                     console.log('[READY] ✓ RenderDesyncProbe acceptance PASSED');
                 }
 
-                // Camera transition starts at READY (not before)
-                this.cameraController.transitionIn(LAYOUT.HOLOGRAM.GRID_SIZE / 2, () => {
-                    console.log('[READY] Camera transition complete');
-                });
+                // Wait for camera transition to complete (grid fully visible)
+                // This ensures the grid is at visibility=1 before user interaction
+                await transitionDone;
+                console.log('[READY] Camera transition and grid visibility complete');
 
-                // ===== UX_READY (1 frame after READY) =====
+                // ===== UX_READY (1 frame after transition) =====
                 // Wait exactly 1 frame before unlocking input.
-                // This ensures the first READY-frame render is committed to screen.
+                // This ensures the fully-visible grid is committed to screen.
                 await this.waitOneFrame();
 
                 console.log('[UX_READY] Input unlock + controls attach');
@@ -634,16 +649,17 @@ export class NavigationScene {
                 }
             }, maxWaitMs);
 
-            // Graceful fallback: if TacticalGrid exists and frames are rendering after 500ms
+            // Graceful fallback: if TacticalGrid exists, is VISIBLE (visibility > 0), and frames are rendering
             gracefulTimeoutId = setTimeout(() => {
                 if (resolved) return;
                 if (naturalFrameCount >= 3) {
                     const mesh = this.scene.getMeshByName('TacticalGrid');
-                    if (mesh && !mesh.isDisposed() && mesh.isEnabled() && mesh.isVisible) {
+                    if (mesh && !mesh.isDisposed() && mesh.isEnabled() && mesh.isVisible && mesh.visibility > 0) {
                         console.warn(
-                            `[VISUAL_READY v2] ⚠ Graceful fallback: TacticalGrid exists and visible, ` +
+                            `[VISUAL_READY v2] ⚠ Graceful fallback: TacticalGrid visible ` +
+                            `(visibility=${mesh.visibility.toFixed(2)}), ` +
                             `${naturalFrameCount} natural frames rendered. ` +
-                            `Frustum/activeMeshes check bypassed (DevTools-independent mode).`
+                            `activeMeshes check bypassed (DevTools-independent mode).`
                         );
                         succeed('gracefulFallback');
                     }
@@ -668,7 +684,9 @@ export class NavigationScene {
                     beforeRenderSeen = false;
                     return;
                 }
-                if (!mesh.isEnabled() || !mesh.isVisible) {
+                // Must be enabled, visible (boolean), AND have visibility > 0 (alpha).
+                // Babylon skips meshes with visibility=0 from activeMeshes evaluation.
+                if (!mesh.isEnabled() || !mesh.isVisible || mesh.visibility <= 0) {
                     beforeRenderSeen = false;
                     return;
                 }
