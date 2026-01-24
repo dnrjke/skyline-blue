@@ -767,14 +767,12 @@ export class BlackHoleForensicProbe {
         const hwScale = this.engine.getHardwareScalingLevel();
         const dpr = window.devicePixelRatio;
 
-        // Size convergence check
-        const expectedEngineW = Math.floor(canvasBufferWidth / hwScale) || 0;
-        const expectedEngineH = Math.floor(canvasBufferHeight / hwScale) || 0;
+        // Size convergence check: engine must equal buffer directly
         const sizeConverged = (
             canvasBufferWidth > 0 &&
             canvasBufferHeight > 0 &&
-            engineRenderWidth === expectedEngineW &&
-            engineRenderHeight === expectedEngineH
+            engineRenderWidth === canvasBufferWidth &&
+            engineRenderHeight === canvasBufferHeight
         );
 
         // DPR convergence
