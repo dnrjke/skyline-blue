@@ -146,7 +146,7 @@ export interface StarvationEnterEvent {
     engine: string;
     /** Mismatch reason: what exactly doesn't match */
     mismatchReason: string;
-    /** Expected engine size (buffer / hwScale) */
+    /** Expected engine size (should equal buffer) */
     expectedEngine: string;
     hwScale: number;
     dpr: number;
@@ -612,7 +612,7 @@ export class PhysicalReadyFlightRecorderProbe {
             // C1: Canvas buffer > 0
             canvasBufW > 0 && canvasBufH > 0,
 
-            // C2: Engine/canvas size converged (accounting for hwScale)
+            // C2: Engine/canvas buffer size converged (direct match)
             this.checkSizeConverged(canvasBufW, canvasBufH, engineW, engineH, hwScale),
 
             // C3: RAF cadence stable
@@ -691,12 +691,9 @@ export class PhysicalReadyFlightRecorderProbe {
     private checkSizeConverged(
         bufW: number, bufH: number,
         engW: number, engH: number,
-        hwScale: number,
+        _hwScale: number,
     ): boolean {
-        if (hwScale <= 0) return false;
-        const expectedW = Math.round(bufW / hwScale);
-        const expectedH = Math.round(bufH / hwScale);
-        return Math.abs(engW - expectedW) <= 1 && Math.abs(engH - expectedH) <= 1;
+        return engW === bufW && engH === bufH;
     }
 
     private isHwScaleStable(): boolean {
@@ -746,10 +743,8 @@ export class PhysicalReadyFlightRecorderProbe {
     ): void {
         const converged = this.checkSizeConverged(bufW, bufH, engW, engH, hwScale);
         if (!converged && !this.activeAnomalies.has('CANVAS_ENGINE_MISMATCH')) {
-            const expectedW = Math.round(bufW / hwScale);
-            const expectedH = Math.round(bufH / hwScale);
             this.openAnomaly(now, 'CANVAS_ENGINE_MISMATCH',
-                `engine=${engW}x${engH} expected=${expectedW}x${expectedH} buf=${bufW}x${bufH} hwScale=${hwScale}`);
+                `engine=${engW}x${engH} buf=${bufW}x${bufH} hwScale=${hwScale}`);
         } else if (converged && this.activeAnomalies.has('CANVAS_ENGINE_MISMATCH')) {
             this.closeAnomaly(now, 'CANVAS_ENGINE_MISMATCH');
         }
@@ -824,12 +819,7 @@ export class PhysicalReadyFlightRecorderProbe {
                 this.isStarved = true;
                 this.starvationEnterTime = now;
 
-                const expectedW = hwScale > 0 ? Math.round(canvasBufW / hwScale) : 0;
-                const expectedH = hwScale > 0 ? Math.round(canvasBufH / hwScale) : 0;
-                const diffW = Math.abs(engineW - expectedW);
-                const diffH = Math.abs(engineH - expectedH);
-                const reason = `engine(${engineW}x${engineH}) != expected(${expectedW}x${expectedH}) ` +
-                    `diff=(${diffW},${diffH}) buf=${canvasBufW}x${canvasBufH} hwScale=${hwScale}`;
+                const reason = `engine(${engineW}x${engineH}) != buffer(${canvasBufW}x${canvasBufH}) hwScale=${hwScale}`;
 
                 const evt: StarvationEnterEvent = {
                     type: 'STARVATION_ENTER',
@@ -839,7 +829,7 @@ export class PhysicalReadyFlightRecorderProbe {
                     canvas: `${canvasBufW}x${canvasBufH}`,
                     engine: `${engineW}x${engineH}`,
                     mismatchReason: reason,
-                    expectedEngine: `${expectedW}x${expectedH}`,
+                    expectedEngine: `${canvasBufW}x${canvasBufH}`,
                     hwScale,
                     dpr: window.devicePixelRatio,
                 };

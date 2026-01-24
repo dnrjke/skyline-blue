@@ -198,10 +198,10 @@ export interface FirstTrueEdge {
 export interface PhysicalReadyConditionValues {
     /** Condition 1: Canvas buffer dimensions */
     canvasBuffer: { width: number; height: number };
-    /** Condition 2: Engine vs canvas size match (raw values for comparison) */
+    /** Condition 2: Engine vs canvas buffer size match (direct comparison) */
     engineVsCanvas: {
         engineW: number; engineH: number;
-        expectedW: number; expectedH: number; // canvas * hwScale
+        expectedW: number; expectedH: number; // canvas buffer dimensions
     };
     /** Condition 3: RAF cadence (dt in ms) */
     rafDt: number;
@@ -737,17 +737,13 @@ export class PhysicalReadyCaptureProbe {
      * The OUTPUT is always raw values, never these booleans.
      */
     private evaluateConditionsRaw(frame: CaptureFrame): boolean[] {
-        const hwScale = frame.hardwareScalingLevel;
-        const expectedEngineW = Math.round(frame.canvasBufferWidth / hwScale);
-        const expectedEngineH = Math.round(frame.canvasBufferHeight / hwScale);
-
         return [
             // C1: Canvas buffer > 0 in both dimensions
             frame.canvasBufferWidth > 0 && frame.canvasBufferHeight > 0,
 
-            // C2: Engine render matches canvas buffer (accounting for hwScale)
-            Math.abs(frame.engineRenderWidth - expectedEngineW) <= 1 &&
-            Math.abs(frame.engineRenderHeight - expectedEngineH) <= 1,
+            // C2: Engine render matches canvas buffer directly
+            frame.engineRenderWidth === frame.canvasBufferWidth &&
+            frame.engineRenderHeight === frame.canvasBufferHeight,
 
             // C3: RAF cadence stable (not throttled)
             frame.independentRafDt > 0 && frame.independentRafDt <= MAX_STABLE_RAF_DT_MS,
@@ -776,7 +772,6 @@ export class PhysicalReadyCaptureProbe {
     }
 
     private extractConditionValues(frame: CaptureFrame): PhysicalReadyConditionValues {
-        const hwScale = frame.hardwareScalingLevel;
         return {
             canvasBuffer: {
                 width: frame.canvasBufferWidth,
@@ -785,8 +780,8 @@ export class PhysicalReadyCaptureProbe {
             engineVsCanvas: {
                 engineW: frame.engineRenderWidth,
                 engineH: frame.engineRenderHeight,
-                expectedW: Math.round(frame.canvasBufferWidth / hwScale),
-                expectedH: Math.round(frame.canvasBufferHeight / hwScale),
+                expectedW: frame.canvasBufferWidth,
+                expectedH: frame.canvasBufferHeight,
             },
             rafDt: frame.independentRafDt,
             resizeEventCount: this.totalResizeCount,
@@ -939,7 +934,7 @@ export class PhysicalReadyCaptureProbe {
             console.table({
                 'Canvas Buffer': `${edge.conditionValues.canvasBuffer.width}x${edge.conditionValues.canvasBuffer.height}`,
                 'Engine Render': `${edge.conditionValues.engineVsCanvas.engineW}x${edge.conditionValues.engineVsCanvas.engineH}`,
-                'Expected (buf/hwScale)': `${edge.conditionValues.engineVsCanvas.expectedW}x${edge.conditionValues.engineVsCanvas.expectedH}`,
+                'Expected (buffer)': `${edge.conditionValues.engineVsCanvas.expectedW}x${edge.conditionValues.engineVsCanvas.expectedH}`,
                 'RAF dt': `${edge.conditionValues.rafDt.toFixed(1)}ms`,
                 'Resize events': edge.conditionValues.resizeEventCount,
                 'Visibility': edge.conditionValues.visibilityState,
