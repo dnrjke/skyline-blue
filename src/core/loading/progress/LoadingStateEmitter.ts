@@ -140,11 +140,32 @@ export class LoadingStateEmitter {
 
     /**
      * Update loading state (triggers onStateChange if changed)
+     *
+     * [Anti-Regression Guard]
+     * Progress must NEVER decrease. If update.progress is less than or equal to
+     * current state.progress, the update is silently ignored to prevent visual
+     * regression (e.g., 100% → 70% during ENGINE_AWAKENED phase).
      */
     setState(update: Partial<LoadingState>): void {
         let changed = false;
 
         for (const key of Object.keys(update) as (keyof LoadingState)[]) {
+            // [Anti-Regression] Progress must never decrease
+            if (key === 'progress') {
+                const newProgress = update[key] as number;
+                const currentProgress = this.state.progress;
+                if (newProgress <= currentProgress) {
+                    // Log regression attempt for debugging
+                    if (newProgress < currentProgress) {
+                        console.warn(
+                            `[LoadingStateEmitter] Progress regression blocked: ` +
+                            `${currentProgress.toFixed(2)} -> ${newProgress.toFixed(2)}`
+                        );
+                    }
+                    continue; // Skip this key - do not regress
+                }
+            }
+
             if (this.state[key] !== update[key]) {
                 (this.state as any)[key] = update[key];
                 changed = true;
