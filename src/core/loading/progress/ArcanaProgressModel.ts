@@ -253,7 +253,26 @@ export class ArcanaProgressModel {
     private listeners: Set<ProgressEventListener> = new Set();
 
     /**
-     * Register units and their weights for progress calculation
+     * [Anti-Regression Lock]
+     * When true, displayProgress updates are frozen.
+     * This prevents visual regression during reset→register transition.
+     * Lock is released when:
+     *   1. New units are registered (totalWeight > 0)
+     *   2. Phase transitions to FETCHING (explicit start)
+     */
+    private progressLocked: boolean = false;
+
+    /**
+     * Cached displayProgress value before lock.
+     * Used to maintain visual continuity during reset.
+     */
+    private lockedDisplayProgress: number = 0;
+
+    /**
+     * Register units and their weights for progress calculation.
+     *
+     * [Anti-Regression] This method releases the progress lock
+     * and sets displayProgress to REGISTRATION_END (10%).
      */
     registerUnits(units: UnitWeightConfig[]): void {
         this.unitWeights.clear();
@@ -261,12 +280,16 @@ export class ArcanaProgressModel {
         this.totalWeight = 0;
         this.completedWeight = 0;
 
+        // Build unit table for logging
+        const unitTable: Array<{ id: string; required: boolean; weight: number }> = [];
+
         for (const unit of units) {
             const weight = unit.weight ?? (unit.required ? 1 : 0.5);
             if (weight > 0) {
                 this.unitWeights.set(unit.id, weight);
                 this.unitStatuses.set(unit.id, LoadUnitStatus.PENDING);
                 this.totalWeight += weight;
+                unitTable.push({ id: unit.id, required: unit.required, weight });
             }
         }
 
@@ -274,7 +297,24 @@ export class ArcanaProgressModel {
         this.rawProgress = PROGRESS_BOUNDS.REGISTRATION_END;
         this.displayProgress = PROGRESS_BOUNDS.REGISTRATION_END;
 
-        console.log(`[ArcanaProgressModel] Registered ${units.length} units, total weight: ${this.totalWeight}`);
+        // [Anti-Regression] Release lock now that totalWeight > 0
+        this.progressLocked = false;
+        this.lockedDisplayProgress = 0;
+
+        // Enhanced logging: Table format for easy debugging
+        console.log(`[ArcanaProgressModel] ═══════════════════════════════════════`);
+        console.log(`[ArcanaProgressModel] Registered ${units.length} units, total weight: ${this.totalWeight.toFixed(1)}`);
+        console.log(`[ArcanaProgressModel] ┌──────────────────────────────┬──────────┬────────┐`);
+        console.log(`[ArcanaProgressModel] │ Unit ID                      │ Required │ Weight │`);
+        console.log(`[ArcanaProgressModel] ├──────────────────────────────┼──────────┼────────┤`);
+        for (const row of unitTable) {
+            const idPad = row.id.padEnd(28).slice(0, 28);
+            const reqPad = (row.required ? 'YES' : 'no').padEnd(8);
+            const weightPad = row.weight.toFixed(1).padStart(6);
+            console.log(`[ArcanaProgressModel] │ ${idPad} │ ${reqPad} │ ${weightPad} │`);
+        }
+        console.log(`[ArcanaProgressModel] └──────────────────────────────┴──────────┴────────┘`);
+        console.log(`[ArcanaProgressModel] Progress initialized: ${(this.displayProgress * 100).toFixed(0)}%`);
     }
 
     /**
@@ -446,9 +486,16 @@ export class ArcanaProgressModel {
     }
 
     /**
-     * Recalculate progress based on unit completion and phase
+     * Recalculate progress based on unit completion and phase.
+     *
+     * [Anti-Regression] Respects progress lock during reset→register transition.
      */
     private recalculateProgress(): void {
+        // [Anti-Regression] Do not recalculate while locked
+        if (this.progressLocked) {
+            return;
+        }
+
         // If stabilizing, hold at 100%
         if (this.stabilizingActive) {
             this.displayProgress = PROGRESS_BOUNDS.STABILIZING;
@@ -461,14 +508,20 @@ export class ArcanaProgressModel {
             return;
         }
 
+        // [Anti-Regression] If totalWeight is 0, do NOT jump to 70%.
+        // Instead, maintain current rawProgress or use REGISTRATION_END.
         if (this.totalWeight === 0) {
-            this.rawProgress = PROGRESS_BOUNDS.VALIDATION_END;
-        } else {
-            // Calculate validation progress (10-70%)
-            const validationRatio = this.completedWeight / this.totalWeight;
-            const validationRange = PROGRESS_BOUNDS.VALIDATION_END - PROGRESS_BOUNDS.VALIDATION_START;
-            this.rawProgress = PROGRESS_BOUNDS.VALIDATION_START + (validationRange * validationRatio);
+            // Keep rawProgress at its current value (likely REGISTRATION_END after registerUnits)
+            // Do NOT set to VALIDATION_END (70%) which causes visual regression.
+            // This case should rarely happen after proper registerUnits() call.
+            console.warn('[ArcanaProgressModel] recalculateProgress called with totalWeight=0. Skipping update.');
+            return;
         }
+
+        // Calculate validation progress (10-70%)
+        const validationRatio = this.completedWeight / this.totalWeight;
+        const validationRange = PROGRESS_BOUNDS.VALIDATION_END - PROGRESS_BOUNDS.VALIDATION_START;
+        this.rawProgress = PROGRESS_BOUNDS.VALIDATION_START + (validationRange * validationRatio);
 
         // Phase-based progress caps
         switch (this.currentPhase) {
@@ -496,9 +549,16 @@ export class ArcanaProgressModel {
     }
 
     /**
-     * Update display progress with compression logic
+     * Update display progress with compression logic.
+     *
+     * [Anti-Regression] Respects progress lock during reset→register transition.
      */
     private updateDisplayProgress(): void {
+        // [Anti-Regression] Do not update while locked
+        if (this.progressLocked) {
+            return;
+        }
+
         if (this.stabilizingActive) {
             this.displayProgress = PROGRESS_BOUNDS.STABILIZING;
             return;
@@ -559,9 +619,13 @@ export class ArcanaProgressModel {
     }
 
     /**
-     * Tick update for animation
+     * Tick update for animation.
+     *
+     * [Anti-Regression] Respects progress lock during reset→register transition.
      */
     tick(): void {
+        // [Anti-Regression] Do not tick while locked
+        if (this.progressLocked) return;
         if (this.stabilizingComplete) return;
 
         const prevDisplay = this.displayProgress;
@@ -573,12 +637,18 @@ export class ArcanaProgressModel {
     }
 
     /**
-     * Get current progress snapshot
+     * Get current progress snapshot.
+     *
+     * [Anti-Regression] Returns locked displayProgress during reset→register transition.
      */
     getSnapshot(): ProgressSnapshot {
+        const effectiveDisplayProgress = this.progressLocked
+            ? this.lockedDisplayProgress
+            : this.displayProgress;
+
         return {
             rawProgress: this.rawProgress,
-            displayProgress: this.displayProgress,
+            displayProgress: effectiveDisplayProgress,
             phase: this.currentPhase,
             isBarrierActive: this.barrierActive,
             isBarrierResolved: this.barrierResolved,
@@ -591,9 +661,14 @@ export class ArcanaProgressModel {
     }
 
     /**
-     * Get display progress (0-1)
+     * Get display progress (0-1).
+     *
+     * [Anti-Regression] Returns locked value during reset→register transition.
      */
     getProgress(): number {
+        if (this.progressLocked) {
+            return this.lockedDisplayProgress;
+        }
         return this.displayProgress;
     }
 
@@ -613,12 +688,18 @@ export class ArcanaProgressModel {
     }
 
     /**
-     * Emit progress event
+     * Emit progress event.
+     *
+     * [Anti-Regression] Uses effective progress (respects lock).
      */
     private emit(event: Omit<ProgressEvent, 'progress' | 'phase'>): void {
+        const effectiveProgress = this.progressLocked
+            ? this.lockedDisplayProgress
+            : this.displayProgress;
+
         const fullEvent: ProgressEvent = {
             ...event,
-            progress: this.displayProgress,
+            progress: effectiveProgress,
             phase: this.currentPhase,
         };
 
@@ -632,12 +713,23 @@ export class ArcanaProgressModel {
     }
 
     /**
-     * Reset model state
+     * Reset model state.
+     *
+     * [Anti-Regression] This method LOCKS progress updates to prevent
+     * visual regression (100% → 70% flicker) during reset→register transition.
+     * The lock is released when registerUnits() is called with new units.
      */
     reset(): void {
+        // [Anti-Regression] Cache current displayProgress and lock updates
+        // This prevents the gauge from jumping to 70% during reset.
+        this.lockedDisplayProgress = this.displayProgress;
+        this.progressLocked = true;
+
         this.currentPhase = LoadingPhase.PENDING;
         this.rawProgress = 0;
-        this.displayProgress = 0;
+        // [Anti-Regression] displayProgress is NOT reset here.
+        // It will be properly set when registerUnits() is called.
+        // Until then, getProgress() returns lockedDisplayProgress.
         this.completedWeight = 0;
         this.barrierActive = false;
         this.barrierResolved = false;
@@ -649,6 +741,7 @@ export class ArcanaProgressModel {
         this.stableFrameCount = 0;
         this.currentUnitName = undefined;
         this.unitStatuses.clear();
+        // Note: unitWeights and totalWeight are cleared in registerUnits()
     }
 
     /**

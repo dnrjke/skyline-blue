@@ -68,6 +68,17 @@ export interface OrchestratorCallbacks {
 }
 
 /**
+ * Orchestrator execute options
+ */
+export interface OrchestratorExecuteOptions extends OrchestratorCallbacks {
+    /**
+     * LoadUnits to execute.
+     * This is the ONLY way to register units - external registerUnits() is deprecated.
+     */
+    units: LoadUnit[];
+}
+
+/**
  * ArcanaLoadingOrchestrator
  */
 export class ArcanaLoadingOrchestrator {
@@ -156,9 +167,24 @@ export class ArcanaLoadingOrchestrator {
     }
 
     /**
-     * Register LoadUnits for execution
+     * @deprecated Use execute({ units: [...] }) instead.
+     * External registration is no longer supported to prevent double-registration bugs.
+     *
+     * This method is kept for backward compatibility but will be removed in future versions.
      */
-    registerUnits(units: LoadUnit[]): void {
+    registerUnits(_units: LoadUnit[]): void {
+        console.warn(
+            '[ArcanaLoadingOrchestrator] DEPRECATED: registerUnits() called externally. ' +
+            'Use execute({ units: [...] }) instead. External registration will be ignored.'
+        );
+        // Intentionally do nothing - units should be passed to execute() directly
+    }
+
+    /**
+     * Internal method to register units.
+     * Called only from execute() to ensure single registration point.
+     */
+    private internalRegisterUnits(units: LoadUnit[]): void {
         this.registry.registerAll(units);
 
         // Build weight config for progress model
@@ -191,25 +217,37 @@ export class ArcanaLoadingOrchestrator {
     }
 
     /**
-     * Execute all registered LoadUnits
+     * Execute LoadUnits.
+     *
+     * [Option C Integration] Units MUST be passed via options.units.
+     * This is the ONLY registration point - no external registerUnits() allowed.
+     *
+     * @param options - Execution options including units and callbacks
      */
-    async execute(callbacks: OrchestratorCallbacks = {}): Promise<ProtocolResult> {
+    async execute(options: OrchestratorExecuteOptions): Promise<ProtocolResult> {
         if (this.isExecuting) {
             throw new Error('[ArcanaLoadingOrchestrator] Already executing');
         }
 
+        const { units, ...callbacks } = options;
+
+        if (!units || units.length === 0) {
+            throw new Error(
+                '[ArcanaLoadingOrchestrator] No units provided. ' +
+                'Pass units via execute({ units: [...] })'
+            );
+        }
+
         this.isExecuting = true;
+
+        // [Anti-Regression] Reset and register in proper sequence
+        // progressModel.reset() locks progress, registerUnits() unlocks it
         this.progressModel.reset();
         this.emitter.reset();
+        this.registry.clear(); // Clean previous registration
 
-        // Re-register units in progress model
-        const units = this.registry.getAllUnits();
-        const weightConfigs: UnitWeightConfig[] = units.map((u) => ({
-            id: u.id,
-            required: u.requiredForReady,
-            weight: this.getUnitWeight(u),
-        }));
-        this.progressModel.registerUnits(weightConfigs);
+        // Single registration point - no duplicates
+        this.internalRegisterUnits(units);
 
         try {
             const result = await this.protocol.execute({
@@ -294,13 +332,15 @@ export class ArcanaLoadingOrchestrator {
     }
 
     /**
-     * Reset orchestrator state
+     * Reset orchestrator state.
+     * Clears all registered units and resets progress.
      */
     reset(): void {
         this.cancel();
         this.registry.clear();
         this.progressModel.reset();
         this.emitter.reset();
+        console.log('[ArcanaLoadingOrchestrator] Reset complete');
     }
 
     /**

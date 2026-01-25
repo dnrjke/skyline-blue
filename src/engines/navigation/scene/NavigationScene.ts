@@ -393,11 +393,11 @@ export class NavigationScene {
                 units.splice(1, 0, this.characterLoadUnit);
             }
 
-            this.orchestrator.registerUnits(units);
-
+            // [Option C] Units are passed directly to execute() - no external registerUnits()
             dbg?.begin('LOADING');
 
             const result = await this.orchestrator.execute({
+                units, // Pass units here, not via registerUnits()
                 onLog: hooks?.onLog,
                 onReady: () => {
                     // VISUAL_READY/STABILIZING complete — orchestrator logical load done.
