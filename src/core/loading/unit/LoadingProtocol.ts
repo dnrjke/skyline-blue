@@ -63,6 +63,24 @@ export interface ProtocolOptions {
     /** Unit 상태 변경 콜백 */
     onUnitStatusChange?: (unit: LoadUnit, newStatus: LoadUnitStatus) => void;
 
+    /**
+     * Unit 시작 콜백 (forensic logging 용)
+     * Called before each unit starts loading.
+     * @param unitId - Unit identifier
+     * @param displayName - Human-readable display name
+     * @param phase - Loading phase
+     */
+    onUnitStart?: (unitId: string, displayName: string, phase: LoadingPhase) => void;
+
+    /**
+     * Unit 완료 콜백 (forensic logging 용)
+     * Called after each unit completes (success or failure).
+     * @param unitId - Unit identifier
+     * @param success - Whether the unit succeeded
+     * @param elapsedMs - Time taken in ms
+     */
+    onUnitEnd?: (unitId: string, success: boolean, elapsedMs: number) => void;
+
     /** Barrier 검증 옵션 (BARRIER phase) */
     barrierValidation?: BarrierValidation;
 
@@ -236,7 +254,15 @@ export class LoadingProtocol {
         // Required units는 순차 실행 (하나라도 실패하면 중단)
         for (const unit of requiredUnits) {
             this.checkCancelled();
-            options.onLog?.(`Loading: ${unit.id}...`);
+
+            const displayName = 'getDisplayName' in unit
+                ? (unit as { getDisplayName(): string }).getDisplayName()
+                : unit.id;
+            const unitStartTime = performance.now();
+
+            // Notify unit start (for forensic logging)
+            options.onUnitStart?.(unit.id, displayName, unit.phase);
+            options.onLog?.(`Loading: ${displayName}...`);
 
             await unit.load(this.scene, (_unitProgress) => {
                 // Unit별 진행률을 전체 진행률에 반영
@@ -244,6 +270,11 @@ export class LoadingProtocol {
                 options.onProgress?.(overallProgress);
             });
 
+            const elapsedMs = performance.now() - unitStartTime;
+            const success = unit.status !== LoadUnitStatus.FAILED;
+
+            // Notify unit end (for forensic logging)
+            options.onUnitEnd?.(unit.id, success, elapsedMs);
             options.onUnitStatusChange?.(unit, unit.status);
 
             if (unit.status === LoadUnitStatus.FAILED) {
@@ -255,12 +286,23 @@ export class LoadingProtocol {
         if (optionalUnits.length > 0) {
             await Promise.allSettled(
                 optionalUnits.map(async (unit) => {
+                    const displayName = 'getDisplayName' in unit
+                        ? (unit as { getDisplayName(): string }).getDisplayName()
+                        : unit.id;
+                    const unitStartTime = performance.now();
+
+                    options.onUnitStart?.(unit.id, displayName, unit.phase);
+
                     try {
                         await unit.load(this.scene);
+                        const elapsedMs = performance.now() - unitStartTime;
+                        options.onUnitEnd?.(unit.id, true, elapsedMs);
                         options.onUnitStatusChange?.(unit, unit.status);
                     } catch (err) {
                         console.warn(`[LoadingProtocol] Optional unit ${unit.id} failed:`, err);
                         unit.status = LoadUnitStatus.SKIPPED;
+                        const elapsedMs = performance.now() - unitStartTime;
+                        options.onUnitEnd?.(unit.id, false, elapsedMs);
                     }
                 })
             );
