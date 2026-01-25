@@ -41,6 +41,104 @@
 
 import * as BABYLON from '@babylonjs/core';
 
+/**
+ * ThrottleLockDetector - Detects browser RAF throttling patterns.
+ *
+ * When a browser throttles RAF to a fixed cadence (e.g., 10fps = 100ms),
+ * frames arrive at consistent intervals that exceed normal "stable" thresholds
+ * but are NOT indicative of rendering instability.
+ *
+ * Pattern recognition:
+ * - Intervals fall within throttle range (e.g., 95-115ms)
+ * - Low variance (stdDev < threshold)
+ * - Consistent cadence over multiple frames
+ *
+ * If detected, the barrier can recognize this as "throttle-stable" and pass.
+ */
+class ThrottleLockDetector {
+    private intervals: number[] = [];
+    private windowSize: number;
+    private stdDevThreshold: number;
+    private intervalRange: [number, number];
+
+    constructor(
+        windowSize: number = 10,
+        stdDevThreshold: number = 5,
+        intervalRange: [number, number] = [95, 115]
+    ) {
+        this.windowSize = windowSize;
+        this.stdDevThreshold = stdDevThreshold;
+        this.intervalRange = intervalRange;
+    }
+
+    /**
+     * Add a frame interval to the detection window.
+     */
+    addInterval(intervalMs: number): void {
+        this.intervals.push(intervalMs);
+        if (this.intervals.length > this.windowSize) {
+            this.intervals.shift();
+        }
+    }
+
+    /**
+     * Check if current pattern indicates throttle-stable state.
+     *
+     * Criteria:
+     * 1. Window is full (enough samples)
+     * 2. All intervals within throttle range
+     * 3. Standard deviation below threshold
+     */
+    isThrottleStable(): boolean {
+        if (this.intervals.length < this.windowSize) {
+            return false;
+        }
+
+        // Check if all intervals are within throttle range
+        const [minRange, maxRange] = this.intervalRange;
+        const allInRange = this.intervals.every(
+            (dt) => dt >= minRange && dt <= maxRange
+        );
+        if (!allInRange) {
+            return false;
+        }
+
+        // Check standard deviation
+        const stdDev = this.calculateStdDev();
+        return stdDev <= this.stdDevThreshold;
+    }
+
+    /**
+     * Get the mean interval (throttle frequency).
+     */
+    getMeanInterval(): number {
+        if (this.intervals.length === 0) return 0;
+        return this.intervals.reduce((a, b) => a + b, 0) / this.intervals.length;
+    }
+
+    /**
+     * Get the standard deviation of intervals.
+     */
+    getStdDev(): number {
+        return this.calculateStdDev();
+    }
+
+    private calculateStdDev(): number {
+        if (this.intervals.length < 2) return 0;
+        const mean = this.getMeanInterval();
+        const squaredDiffs = this.intervals.map((v) => Math.pow(v - mean, 2));
+        const variance = squaredDiffs.reduce((a, b) => a + b, 0) / this.intervals.length;
+        return Math.sqrt(variance);
+    }
+
+    /**
+     * Reset the detector.
+     */
+    reset(): void {
+        this.intervals = [];
+    }
+}
+
 export interface EngineAwakenedConfig {
     /** Minimum consecutive STABLE natural frames required (default: 3) */
     minConsecutiveFrames?: number;
@@ -55,12 +153,37 @@ export interface EngineAwakenedConfig {
     /** Maximum retry attempts if natural frames don't follow burst (default: 2) */
     maxBurstRetries?: number;
     /**
-     * Graceful fallback timeout (ms) for Phase 2. (default: 500)
-     * If this time elapses AND at least 1 natural frame was observed,
+     * Graceful fallback timeout (ms) for Phase 2. (default: 200)
+     * If this time elapses AND at least minNaturalFramesForGraceful frames were observed,
      * pass with a warning even without 3 consecutive stable frames.
      * This prevents DevTools-dependent hangs.
      */
     gracefulFallbackMs?: number;
+    /**
+     * Minimum natural frames required for graceful fallback (default: 10)
+     * Graceful pass only triggers after this many frames have been rendered.
+     */
+    minNaturalFramesForGraceful?: number;
+    /**
+     * Enable Throttle-Stable detection (default: true)
+     * If enabled, recognizes browser RAF throttling as a valid stable state.
+     */
+    enableThrottleDetection?: boolean;
+    /**
+     * Window size for throttle pattern detection (default: 10)
+     * Number of recent frame intervals to analyze.
+     */
+    throttleDetectionWindow?: number;
+    /**
+     * Maximum standard deviation for throttle-stable pattern (default: 5ms)
+     * If stdDev of recent intervals is below this, it's considered stable throttle.
+     */
+    throttleStdDevThresholdMs?: number;
+    /**
+     * Throttle interval range [min, max] in ms (default: [95, 115])
+     * Intervals within this range are considered potential throttle patterns.
+     */
+    throttleIntervalRange?: [number, number];
 }
 
 export interface EngineAwakenedResult {
@@ -82,6 +205,12 @@ export interface EngineAwakenedResult {
     firstFrameDelayMs: number;
     /** Number of burst iterations executed */
     burstCount: number;
+    /** Whether passed via throttle-stable detection */
+    throttleStable?: boolean;
+    /** Detected throttle frequency in ms (if throttle-stable) */
+    throttleIntervalMs?: number;
+    /** Standard deviation of detected throttle pattern */
+    throttleStdDevMs?: number;
 }
 
 /**
@@ -104,7 +233,12 @@ export class EngineAwakenedBarrier {
             debug: config.debug ?? true,
             burstFrameCount: config.burstFrameCount ?? 5,
             maxBurstRetries: config.maxBurstRetries ?? 2,
-            gracefulFallbackMs: config.gracefulFallbackMs ?? 500,
+            gracefulFallbackMs: config.gracefulFallbackMs ?? 200,  // Shortened: 500 → 200
+            minNaturalFramesForGraceful: config.minNaturalFramesForGraceful ?? 10,
+            enableThrottleDetection: config.enableThrottleDetection ?? true,
+            throttleDetectionWindow: config.throttleDetectionWindow ?? 10,
+            throttleStdDevThresholdMs: config.throttleStdDevThresholdMs ?? 5,
+            throttleIntervalRange: config.throttleIntervalRange ?? [95, 115],
         };
     }
 
@@ -247,6 +381,10 @@ export class EngineAwakenedBarrier {
      * A frame is "stable" if its dt (time since last frame) is < maxAllowedFrameGapMs.
      * The first frame is allowed to be slow (cold start), subsequent must be stable.
      *
+     * NEW: Throttle-Stable Detection
+     * If RAF is throttled (e.g., 10fps = 100ms intervals) but consistent,
+     * recognize this as "throttle-stable" and pass immediately.
+     *
      * HARD GATE: If timeout expires with insufficient stable frames, this FAILS.
      * There is NO auto-pass. The caller must handle failure.
      */
@@ -272,6 +410,16 @@ export class EngineAwakenedBarrier {
             let gracefulTimeoutId: ReturnType<typeof setTimeout> | null = null;
             let resolved = false;
 
+            // Throttle-Stable detection
+            const throttleDetector = this.config.enableThrottleDetection
+                ? new ThrottleLockDetector(
+                    this.config.throttleDetectionWindow,
+                    this.config.throttleStdDevThresholdMs,
+                    this.config.throttleIntervalRange
+                )
+                : null;
+            let throttleStableResult: { detected: boolean; intervalMs: number; stdDevMs: number } | null = null;
+
             const cleanup = () => {
                 if (observer) {
                     this.scene.onBeforeRenderObservable.remove(observer);
@@ -287,7 +435,12 @@ export class EngineAwakenedBarrier {
                 }
             };
 
-            const complete = (passed: boolean, timedOut: boolean = false, graceful: boolean = false) => {
+            const complete = (
+                passed: boolean,
+                timedOut: boolean = false,
+                graceful: boolean = false,
+                throttleStable: boolean = false
+            ) => {
                 if (resolved) return;
                 resolved = true;
 
@@ -296,7 +449,7 @@ export class EngineAwakenedBarrier {
 
                 const avgFrameIntervalMs = stableFrameIntervals.length > 0
                     ? stableFrameIntervals.reduce((a, b) => a + b, 0) / stableFrameIntervals.length
-                    : 0;
+                    : (throttleStableResult?.intervalMs ?? 0);
 
                 const firstFrameDelayMs = firstFrameTime !== null
                     ? firstFrameTime - phase2Start
@@ -312,10 +465,21 @@ export class EngineAwakenedBarrier {
                     maxFrameIntervalMs: maxFrameInterval,
                     firstFrameDelayMs,
                     burstCount,
+                    throttleStable,
+                    throttleIntervalMs: throttleStableResult?.intervalMs,
+                    throttleStdDevMs: throttleStableResult?.stdDevMs,
                 };
 
                 if (this.config.debug) {
-                    if (passed && !graceful) {
+                    if (passed && throttleStable) {
+                        console.log(
+                            `[ENGINE_AWAKENED] ✓ THROTTLE-STABLE PASS: ` +
+                            `RAF locked at ~${throttleStableResult?.intervalMs.toFixed(1)}ms ` +
+                            `(stdDev=${throttleStableResult?.stdDevMs.toFixed(2)}ms), ` +
+                            `${totalFrameCount} natural frames, ` +
+                            `elapsed=${elapsedMs.toFixed(1)}ms, bursts=${burstCount}`
+                        );
+                    } else if (passed && !graceful) {
                         console.log(
                             `[ENGINE_AWAKENED] ✓ PASSED: ` +
                             `${consecutiveStableFrames} stable natural frames, ` +
@@ -349,8 +513,12 @@ export class EngineAwakenedBarrier {
             hardTimeoutId = setTimeout(() => {
                 if (consecutiveStableFrames >= this.config.minConsecutiveFrames) {
                     complete(true, false);
-                } else if (totalFrameCount > 0) {
+                } else if (totalFrameCount >= this.config.minNaturalFramesForGraceful) {
                     // Frames ARE rendering, just not stable enough — graceful pass
+                    // But require minimum frame count to ensure rendering is actually happening
+                    complete(true, true, true);
+                } else if (totalFrameCount > 0) {
+                    // Some frames but not enough for graceful — still pass but log warning
                     complete(true, true, true);
                 } else {
                     // Zero frames = true failure
@@ -358,16 +526,20 @@ export class EngineAwakenedBarrier {
                 }
             }, remainingMs);
 
-            // GRACEFUL FALLBACK — after gracefulFallbackMs, pass if ANY frames rendered.
+            // GRACEFUL FALLBACK — after gracefulFallbackMs, pass if minimum frames rendered.
             // This prevents DevTools-dependent hangs where frame gaps exceed threshold
             // but rendering IS active.
+            // NEW: Require minNaturalFramesForGraceful (default 10) frames before graceful pass.
             gracefulTimeoutId = setTimeout(() => {
-                if (totalFrameCount > 0 && consecutiveStableFrames < this.config.minConsecutiveFrames) {
+                if (
+                    totalFrameCount >= this.config.minNaturalFramesForGraceful &&
+                    consecutiveStableFrames < this.config.minConsecutiveFrames
+                ) {
                     if (this.config.debug) {
                         console.log(
                             `[ENGINE_AWAKENED] Graceful fallback triggered: ` +
-                            `${totalFrameCount} frames, ${consecutiveStableFrames} stable ` +
-                            `(< ${this.config.minConsecutiveFrames} required)`
+                            `${totalFrameCount} frames (>= ${this.config.minNaturalFramesForGraceful} min), ` +
+                            `${consecutiveStableFrames} stable (< ${this.config.minConsecutiveFrames} required)`
                         );
                     }
                     complete(true, false, true);
@@ -404,7 +576,25 @@ export class EngineAwakenedBarrier {
                 // Track max interval
                 maxFrameInterval = Math.max(maxFrameInterval, frameInterval);
 
-                // Check stability
+                // Feed throttle detector
+                if (throttleDetector) {
+                    throttleDetector.addInterval(frameInterval);
+
+                    // Check for throttle-stable pattern
+                    if (throttleDetector.isThrottleStable()) {
+                        throttleStableResult = {
+                            detected: true,
+                            intervalMs: throttleDetector.getMeanInterval(),
+                            stdDevMs: throttleDetector.getStdDev(),
+                        };
+
+                        // THROTTLE-STABLE detected — pass immediately
+                        complete(true, false, false, true);
+                        return;
+                    }
+                }
+
+                // Check stability (normal path)
                 const isStable = frameInterval < this.config.maxAllowedFrameGapMs;
 
                 if (isStable) {
@@ -456,6 +646,9 @@ export class EngineAwakenedBarrier {
             maxFrameIntervalMs: 0,
             firstFrameDelayMs: -1,
             burstCount,
+            throttleStable: false,
+            throttleIntervalMs: undefined,
+            throttleStdDevMs: undefined,
         };
     }
 

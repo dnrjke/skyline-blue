@@ -91,6 +91,22 @@ interface TrackedAsync {
     resolved: boolean;
 }
 
+/**
+ * Current loading context — set by orchestrator to identify culprit during stalls.
+ */
+interface LoadingUnitContext {
+    /** Unit ID (e.g., 'nav-character', 'MaterialWarmup') */
+    unitId: string;
+    /** Display name */
+    displayName: string;
+    /** Progress (0-1) */
+    progress: number;
+    /** Phase (e.g., 'BUILDING', 'WARMING') */
+    phase: string;
+    /** Start time */
+    startTime: number;
+}
+
 // ============================================================
 // BlackHoleLogger
 // ============================================================
@@ -120,6 +136,9 @@ export class BlackHoleLogger {
 
     // Auto-stop
     private autoStopTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // Current loading unit context (for forensic stall identification)
+    private loadingContext: LoadingUnitContext | null = null;
 
     constructor(scene: BABYLON.Scene, config: BlackHoleConfig = {}) {
         this.scene = scene;
@@ -209,6 +228,7 @@ export class BlackHoleLogger {
         this.disposed = true;
         this.trackedMeshes.clear();
         this.asyncTasks.clear();
+        this.loadingContext = null;
         this.entries = [];
     }
 
@@ -232,6 +252,67 @@ export class BlackHoleLogger {
      */
     markStall(reason: string, data?: Record<string, unknown>): void {
         this.emit('stall', 'stall', reason, undefined, data);
+    }
+
+    // ============================================================
+    // Loading Unit Context (Forensic Identification)
+    // ============================================================
+
+    /**
+     * Set the current loading unit context.
+     * Call this from orchestrator when a unit starts loading.
+     * This info is included in stall logs to identify the "culprit".
+     */
+    setLoadingContext(
+        unitId: string,
+        displayName: string,
+        phase: string,
+        progress: number = 0
+    ): void {
+        this.loadingContext = {
+            unitId,
+            displayName,
+            phase,
+            progress,
+            startTime: performance.now(),
+        };
+
+        this.emit('info', 'async', 'LOADING_UNIT_START', unitId, {
+            displayName,
+            phase,
+        });
+    }
+
+    /**
+     * Update the progress of current loading unit.
+     */
+    updateLoadingProgress(progress: number): void {
+        if (this.loadingContext) {
+            this.loadingContext.progress = progress;
+        }
+    }
+
+    /**
+     * Clear the current loading unit context.
+     * Call this when a unit finishes loading.
+     */
+    clearLoadingContext(): void {
+        if (this.loadingContext) {
+            const elapsed = performance.now() - this.loadingContext.startTime;
+            this.emit('info', 'async', 'LOADING_UNIT_END', this.loadingContext.unitId, {
+                displayName: this.loadingContext.displayName,
+                phase: this.loadingContext.phase,
+                elapsedMs: Math.round(elapsed),
+            });
+            this.loadingContext = null;
+        }
+    }
+
+    /**
+     * Get current loading context (for external inspection).
+     */
+    getLoadingContext(): LoadingUnitContext | null {
+        return this.loadingContext ? { ...this.loadingContext } : null;
     }
 
     // ============================================================
@@ -259,16 +340,34 @@ export class BlackHoleLogger {
             // Stall detection
             if (gap > this.config.stallThresholdMs) {
                 this.totalStalls++;
-                this.emit('stall', 'stall', 'FRAME_GAP', undefined, {
+
+                // Include loading context in stall data for forensic identification
+                const stallData: Record<string, unknown> = {
                     gapMs: Math.round(gap),
                     frame: this.frameCount,
                     stallCount: this.totalStalls,
-                });
+                };
+
+                // Identify the "culprit" — which unit was loading during the stall
+                if (this.loadingContext) {
+                    stallData.loadingUnit = this.loadingContext.unitId;
+                    stallData.loadingUnitDisplay = this.loadingContext.displayName;
+                    stallData.loadingPhase = this.loadingContext.phase;
+                    stallData.loadingProgress = Math.round(this.loadingContext.progress * 100);
+                    stallData.loadingElapsedMs = Math.round(
+                        performance.now() - this.loadingContext.startTime
+                    );
+                }
+
+                this.emit('stall', 'stall', 'FRAME_GAP', this.loadingContext?.unitId, stallData);
 
                 if (this.config.consoleStalls) {
+                    const unitInfo = this.loadingContext
+                        ? ` [CULPRIT: ${this.loadingContext.displayName} @ ${Math.round(this.loadingContext.progress * 100)}%]`
+                        : '';
                     console.warn(
                         `[BlackHole] STALL #${this.totalStalls}: ` +
-                        `${gap.toFixed(0)}ms gap at frame ${this.frameCount}`
+                        `${gap.toFixed(0)}ms gap at frame ${this.frameCount}${unitInfo}`
                     );
                 }
             }
