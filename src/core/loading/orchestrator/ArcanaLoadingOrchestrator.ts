@@ -68,6 +68,17 @@ export interface OrchestratorCallbacks {
 }
 
 /**
+ * Orchestrator execute options
+ */
+export interface OrchestratorExecuteOptions extends OrchestratorCallbacks {
+    /**
+     * LoadUnits to execute.
+     * This is the ONLY way to register units - external registerUnits() is deprecated.
+     */
+    units: LoadUnit[];
+}
+
+/**
  * ArcanaLoadingOrchestrator
  */
 export class ArcanaLoadingOrchestrator {
@@ -80,6 +91,14 @@ export class ArcanaLoadingOrchestrator {
     private config: OrchestratorConfig;
     private compressionTimerId: number | null = null;
     private isExecuting: boolean = false;
+
+    /**
+     * [Animation Lifecycle Guard]
+     * When true, any residual tick() callback must exit immediately.
+     * This prevents race conditions where a tick fires between
+     * barrier_resolve and stopCompressionAnimation() clearTimeout.
+     */
+    private compressionAnimationStopped: boolean = true;
 
     constructor(scene: BABYLON.Scene, config: OrchestratorConfig = {}) {
         this.scene = scene;
@@ -156,9 +175,24 @@ export class ArcanaLoadingOrchestrator {
     }
 
     /**
-     * Register LoadUnits for execution
+     * @deprecated Use execute({ units: [...] }) instead.
+     * External registration is no longer supported to prevent double-registration bugs.
+     *
+     * This method is kept for backward compatibility but will be removed in future versions.
      */
-    registerUnits(units: LoadUnit[]): void {
+    registerUnits(_units: LoadUnit[]): void {
+        console.warn(
+            '[ArcanaLoadingOrchestrator] DEPRECATED: registerUnits() called externally. ' +
+            'Use execute({ units: [...] }) instead. External registration will be ignored.'
+        );
+        // Intentionally do nothing - units should be passed to execute() directly
+    }
+
+    /**
+     * Internal method to register units.
+     * Called only from execute() to ensure single registration point.
+     */
+    private internalRegisterUnits(units: LoadUnit[]): void {
         this.registry.registerAll(units);
 
         // Build weight config for progress model
@@ -191,25 +225,37 @@ export class ArcanaLoadingOrchestrator {
     }
 
     /**
-     * Execute all registered LoadUnits
+     * Execute LoadUnits.
+     *
+     * [Option C Integration] Units MUST be passed via options.units.
+     * This is the ONLY registration point - no external registerUnits() allowed.
+     *
+     * @param options - Execution options including units and callbacks
      */
-    async execute(callbacks: OrchestratorCallbacks = {}): Promise<ProtocolResult> {
+    async execute(options: OrchestratorExecuteOptions): Promise<ProtocolResult> {
         if (this.isExecuting) {
             throw new Error('[ArcanaLoadingOrchestrator] Already executing');
         }
 
+        const { units, ...callbacks } = options;
+
+        if (!units || units.length === 0) {
+            throw new Error(
+                '[ArcanaLoadingOrchestrator] No units provided. ' +
+                'Pass units via execute({ units: [...] })'
+            );
+        }
+
         this.isExecuting = true;
+
+        // [Anti-Regression] Reset and register in proper sequence
+        // progressModel.reset() locks progress, registerUnits() unlocks it
         this.progressModel.reset();
         this.emitter.reset();
+        this.registry.clear(); // Clean previous registration
 
-        // Re-register units in progress model
-        const units = this.registry.getAllUnits();
-        const weightConfigs: UnitWeightConfig[] = units.map((u) => ({
-            id: u.id,
-            required: u.requiredForReady,
-            weight: this.getUnitWeight(u),
-        }));
-        this.progressModel.registerUnits(weightConfigs);
+        // Single registration point - no duplicates
+        this.internalRegisterUnits(units);
 
         try {
             const result = await this.protocol.execute({
@@ -254,6 +300,10 @@ export class ArcanaLoadingOrchestrator {
 
     /**
      * Start compression phase animation (time-based slow easing)
+     *
+     * [Animation Lifecycle]
+     * - Sets compressionAnimationStopped = false to allow tick execution
+     * - tick() checks this flag first to prevent race conditions
      */
     private startCompressionAnimation(): void {
         if (!this.config.enableCompressionAnimation) return;
@@ -261,14 +311,29 @@ export class ArcanaLoadingOrchestrator {
 
         const tickMs = this.config.compressionTickMs ?? 16;
 
+        // [Lifecycle] Mark animation as active
+        this.compressionAnimationStopped = false;
+
         const tick = () => {
+            // [Lifecycle Guard] Exit immediately if animation was stopped.
+            // This prevents race conditions where tick fires between
+            // barrier_resolve emit and clearTimeout execution.
+            if (this.compressionAnimationStopped) {
+                return;
+            }
+
+            // Secondary check: barrier phase exit
             if (!this.progressModel.getSnapshot().isBarrierActive) {
                 this.stopCompressionAnimation();
                 return;
             }
 
             this.progressModel.tick();
-            this.compressionTimerId = window.setTimeout(tick, tickMs);
+
+            // Only schedule next tick if animation is still active
+            if (!this.compressionAnimationStopped) {
+                this.compressionTimerId = window.setTimeout(tick, tickMs);
+            }
         };
 
         this.compressionTimerId = window.setTimeout(tick, tickMs);
@@ -276,8 +341,17 @@ export class ArcanaLoadingOrchestrator {
 
     /**
      * Stop compression phase animation
+     *
+     * [Animation Lifecycle]
+     * - IMMEDIATELY sets compressionAnimationStopped = true (before clearTimeout)
+     * - This ensures any in-flight tick() callback exits at the guard check
+     * - Then clears the timer to prevent future scheduling
      */
     private stopCompressionAnimation(): void {
+        // [Lifecycle] Mark animation as stopped FIRST.
+        // Any tick() callback that fires after this point will exit immediately.
+        this.compressionAnimationStopped = true;
+
         if (this.compressionTimerId !== null) {
             clearTimeout(this.compressionTimerId);
             this.compressionTimerId = null;
@@ -294,13 +368,15 @@ export class ArcanaLoadingOrchestrator {
     }
 
     /**
-     * Reset orchestrator state
+     * Reset orchestrator state.
+     * Clears all registered units and resets progress.
      */
     reset(): void {
         this.cancel();
         this.registry.clear();
         this.progressModel.reset();
         this.emitter.reset();
+        console.log('[ArcanaLoadingOrchestrator] Reset complete');
     }
 
     /**
