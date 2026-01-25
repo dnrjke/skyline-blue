@@ -31,6 +31,7 @@
  */
 
 import * as BABYLON from '@babylonjs/core';
+import { ThrottleLockDetector } from '../../../core/loading/barrier/ThrottleLockDetector';
 
 // ============================================================
 // Constants
@@ -312,6 +313,15 @@ export class PhysicalReadyFlightRecorderProbe {
     // Auto-stop
     private autoStopTimer: ReturnType<typeof setTimeout> | null = null;
 
+    // Throttle-stable detection (shared with EngineAwakenedBarrier)
+    private throttleDetector: ThrottleLockDetector;
+
+    // Focus-based recovery tracking
+    private lastVisibility: DocumentVisibilityState = 'visible';
+    private focusRecoveryStartTime: number = 0;
+    private focusRecoveryCheckActive: boolean = false;
+    private focusRecoveryFrames: number[] = [];
+
     constructor(scene: BABYLON.Scene, config: FlightRecorderConfig = {}) {
         this.scene = scene;
         this.engine = scene.getEngine();
@@ -321,6 +331,9 @@ export class PhysicalReadyFlightRecorderProbe {
             consoleOutput: config.consoleOutput ?? true,
             maxEvents: config.maxEvents ?? MAX_EVENTS,
         };
+
+        // Initialize throttle detector with same parameters as EngineAwakenedBarrier
+        this.throttleDetector = new ThrottleLockDetector(10, 5, [95, 115]);
     }
 
     // ============================================================
@@ -349,6 +362,11 @@ export class PhysicalReadyFlightRecorderProbe {
         this.lastRafTime = this.startTime;
         this.currentRafDt = 0;
         this.rafTick = 0;
+        this.throttleDetector.reset();
+        this.lastVisibility = document.visibilityState;
+        this.focusRecoveryStartTime = 0;
+        this.focusRecoveryCheckActive = false;
+        this.focusRecoveryFrames = [];
 
         this.setupIndependentRaf();
         this.setupBabylonObserver();
@@ -607,6 +625,18 @@ export class PhysicalReadyFlightRecorderProbe {
             return { ready: true, conditions: [true, true, true, true, true, true, true, true] };
         }
 
+        // Feed throttle detector and check for throttle-stable pattern
+        this.throttleDetector.addInterval(rafDt);
+        const isThrottleStable = this.throttleDetector.isThrottleStable();
+
+        // Check focus-based recovery (visibility hidden->visible transition)
+        this.checkFocusRecovery(visibility, rafDt);
+
+        // When throttle-stable, ignore RAF_FREQUENCY_LOCK as it's expected behavior
+        const criticalAnomalies = isThrottleStable
+            ? Array.from(this.activeAnomalies.keys()).filter(a => a !== 'RAF_FREQUENCY_LOCK')
+            : Array.from(this.activeAnomalies.keys());
+
         // 8 conditions (all must be true simultaneously)
         const conditions: boolean[] = [
             // C1: Canvas buffer > 0
@@ -615,8 +645,8 @@ export class PhysicalReadyFlightRecorderProbe {
             // C2: Engine/canvas buffer size converged (direct match)
             this.checkSizeConverged(canvasBufW, canvasBufH, engineW, engineH, hwScale),
 
-            // C3: RAF cadence stable
-            rafDt > 0 && rafDt <= MAX_STABLE_RAF_DT_MS,
+            // C3: RAF cadence stable OR throttle-stable (browser throttling accepted)
+            (rafDt > 0 && rafDt <= MAX_STABLE_RAF_DT_MS) || isThrottleStable,
 
             // C4: At least one resize event
             this.totalResizeCount > 0,
@@ -630,8 +660,8 @@ export class PhysicalReadyFlightRecorderProbe {
             // C7: DPR positive
             dpr > 0,
 
-            // C8: No active critical anomalies
-            this.activeAnomalies.size === 0,
+            // C8: No active critical anomalies (RAF_FREQUENCY_LOCK ignored when throttle-stable)
+            criticalAnomalies.length === 0,
         ];
 
         const allPass = conditions.every(c => c);
@@ -700,6 +730,62 @@ export class PhysicalReadyFlightRecorderProbe {
         if (this.hwScaleHistory.length < 3) return false;
         const last3 = this.hwScaleHistory.slice(-3);
         return last3.every(v => v === last3[0]);
+    }
+
+    /**
+     * Focus-Based Recovery Detection
+     *
+     * Detects when RAF recovers to 60fps after visibility hidden->visible transition.
+     * Logs "[SYSTEM] Performance Restored: 60fps" when detected.
+     *
+     * Pattern:
+     * 1. Visibility changes from 'hidden' to 'visible'
+     * 2. Start monitoring RAF intervals
+     * 3. If 5 consecutive frames are at ~16.67ms (60fps), log recovery
+     */
+    private checkFocusRecovery(visibility: DocumentVisibilityState, rafDt: number): void {
+        // Detect visibility hidden -> visible transition
+        if (this.lastVisibility === 'hidden' && visibility === 'visible') {
+            this.focusRecoveryCheckActive = true;
+            this.focusRecoveryStartTime = performance.now();
+            this.focusRecoveryFrames = [];
+            this.log('[FOCUS] Visibility restored (hidden -> visible), monitoring RAF recovery...');
+        }
+
+        this.lastVisibility = visibility;
+
+        // If recovery check is active, monitor RAF intervals
+        if (this.focusRecoveryCheckActive && visibility === 'visible') {
+            this.focusRecoveryFrames.push(rafDt);
+
+            // Keep only last 5 frames
+            if (this.focusRecoveryFrames.length > 5) {
+                this.focusRecoveryFrames.shift();
+            }
+
+            // Check if last 5 frames are at ~60fps (dt <= 20ms)
+            if (this.focusRecoveryFrames.length >= 5) {
+                const all60fps = this.focusRecoveryFrames.every(dt => dt > 0 && dt <= 20);
+
+                if (all60fps) {
+                    const avgDt = this.focusRecoveryFrames.reduce((a, b) => a + b, 0) / this.focusRecoveryFrames.length;
+                    const recoveryDuration = performance.now() - this.focusRecoveryStartTime;
+
+                    this.log(`[SYSTEM] Performance Restored: 60fps (avg dt=${avgDt.toFixed(1)}ms, recovery took ${recoveryDuration.toFixed(0)}ms)`);
+
+                    // Reset recovery check
+                    this.focusRecoveryCheckActive = false;
+                    this.focusRecoveryFrames = [];
+                }
+            }
+
+            // Timeout recovery check after 10 seconds
+            if (performance.now() - this.focusRecoveryStartTime > 10000) {
+                this.log('[FOCUS] Recovery check timeout (10s) - RAF did not restore to 60fps');
+                this.focusRecoveryCheckActive = false;
+                this.focusRecoveryFrames = [];
+            }
+        }
     }
 
     // ============================================================
