@@ -622,11 +622,22 @@ export class ArcanaProgressModel {
      * Tick update for animation.
      *
      * [Anti-Regression] Respects progress lock during reset→register transition.
+     *
+     * [70-100% Isolation Gate]
+     * Once visualReadyActive or stabilizingActive is true, the 70-100% range
+     * is managed exclusively by dedicated stabilization logic.
+     * General tick (Compression Animation) must NOT pollute this range.
      */
     tick(): void {
         // [Anti-Regression] Do not tick while locked
         if (this.progressLocked) return;
         if (this.stabilizingComplete) return;
+
+        // [70-100% Isolation] Block tick once we've entered post-barrier phases.
+        // These phases have dedicated progress management and must not be
+        // contaminated by Compression Animation's 70% recalculation.
+        if (this.visualReadyActive) return;
+        if (this.stabilizingActive) return;
 
         const prevDisplay = this.displayProgress;
         this.updateDisplayProgress();

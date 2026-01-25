@@ -92,6 +92,14 @@ export class ArcanaLoadingOrchestrator {
     private compressionTimerId: number | null = null;
     private isExecuting: boolean = false;
 
+    /**
+     * [Animation Lifecycle Guard]
+     * When true, any residual tick() callback must exit immediately.
+     * This prevents race conditions where a tick fires between
+     * barrier_resolve and stopCompressionAnimation() clearTimeout.
+     */
+    private compressionAnimationStopped: boolean = true;
+
     constructor(scene: BABYLON.Scene, config: OrchestratorConfig = {}) {
         this.scene = scene;
         this.config = config;
@@ -292,6 +300,10 @@ export class ArcanaLoadingOrchestrator {
 
     /**
      * Start compression phase animation (time-based slow easing)
+     *
+     * [Animation Lifecycle]
+     * - Sets compressionAnimationStopped = false to allow tick execution
+     * - tick() checks this flag first to prevent race conditions
      */
     private startCompressionAnimation(): void {
         if (!this.config.enableCompressionAnimation) return;
@@ -299,14 +311,29 @@ export class ArcanaLoadingOrchestrator {
 
         const tickMs = this.config.compressionTickMs ?? 16;
 
+        // [Lifecycle] Mark animation as active
+        this.compressionAnimationStopped = false;
+
         const tick = () => {
+            // [Lifecycle Guard] Exit immediately if animation was stopped.
+            // This prevents race conditions where tick fires between
+            // barrier_resolve emit and clearTimeout execution.
+            if (this.compressionAnimationStopped) {
+                return;
+            }
+
+            // Secondary check: barrier phase exit
             if (!this.progressModel.getSnapshot().isBarrierActive) {
                 this.stopCompressionAnimation();
                 return;
             }
 
             this.progressModel.tick();
-            this.compressionTimerId = window.setTimeout(tick, tickMs);
+
+            // Only schedule next tick if animation is still active
+            if (!this.compressionAnimationStopped) {
+                this.compressionTimerId = window.setTimeout(tick, tickMs);
+            }
         };
 
         this.compressionTimerId = window.setTimeout(tick, tickMs);
@@ -314,8 +341,17 @@ export class ArcanaLoadingOrchestrator {
 
     /**
      * Stop compression phase animation
+     *
+     * [Animation Lifecycle]
+     * - IMMEDIATELY sets compressionAnimationStopped = true (before clearTimeout)
+     * - This ensures any in-flight tick() callback exits at the guard check
+     * - Then clears the timer to prevent future scheduling
      */
     private stopCompressionAnimation(): void {
+        // [Lifecycle] Mark animation as stopped FIRST.
+        // Any tick() callback that fires after this point will exit immediately.
+        this.compressionAnimationStopped = true;
+
         if (this.compressionTimerId !== null) {
             clearTimeout(this.compressionTimerId);
             this.compressionTimerId = null;
