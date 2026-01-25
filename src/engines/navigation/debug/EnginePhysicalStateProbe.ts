@@ -23,7 +23,7 @@
  * KEY CONCEPT: PHYSICAL_READY_FRAME
  * The first frame where ALL of the following hold:
  *   1. canvas.width > 0 AND canvas.height > 0
- *   2. engine.getRenderWidth() === canvas.width (accounting for hardware scaling)
+ *   2. engine.getRenderWidth() === canvas.width (direct comparison)
  *   3. hardware scaling level is applied and stable
  *   4. At least one post-process has executed (if pipeline exists)
  *
@@ -55,7 +55,7 @@ export interface PhysicalFrameSnapshot {
 
     // Derived checks
     cssBufferMatch: boolean;     // CSS * DPR ≈ buffer?
-    engineBufferMatch: boolean;  // engine render === buffer (scaled)?
+    engineBufferMatch: boolean;  // engine render === buffer? (direct comparison)
 
     // RAF timing
     rafDt: number;  // ms since last onBeforeRender
@@ -295,10 +295,10 @@ export class EnginePhysicalStateProbe {
             if (engineW === 0 || engineH === 0) this.engineSizeZeroFrames++;
             if (canvasW === 0 || canvasH === 0) this.canvasSizeZeroFrames++;
 
-            // Engine render size should equal canvas buffer / hwScale
-            const expectedEngineW = Math.floor(canvasW / hwScale) || 0;
-            const expectedEngineH = Math.floor(canvasH / hwScale) || 0;
-            const engineBufferMatch = (engineW === expectedEngineW && engineH === expectedEngineH);
+            // Engine render size should equal canvas buffer size (direct comparison).
+            // Babylon's getRenderWidth() already returns the final render buffer size,
+            // which should match canvas.width/height after proper initialization.
+            const engineBufferMatch = (engineW === canvasW && engineH === canvasH);
             if (!engineBufferMatch && canvasW > 0) this.sizeMismatchFrames++;
 
             // --- Detect state CHANGES (log on change only) ---
@@ -396,7 +396,7 @@ export class EnginePhysicalStateProbe {
         // Condition 1: Canvas size ≠ 0
         if (canvasW === 0 || canvasH === 0) return null;
 
-        // Condition 2: Engine render size == canvas buffer size (accounting for scaling)
+        // Condition 2: Engine render size == canvas buffer size (direct comparison)
         if (!engineBufferMatch) return null;
 
         // Condition 3: Hardware scaling applied and non-zero
@@ -598,10 +598,10 @@ export class EnginePhysicalStateProbe {
             Math.abs(canvasBufferHeight - expectedBufferH) <= 1
         );
 
-        // Engine render === buffer / hwScale?
-        const expectedEngineW = Math.floor(canvasBufferWidth / hardwareScalingLevel) || 0;
-        const expectedEngineH = Math.floor(canvasBufferHeight / hardwareScalingLevel) || 0;
-        const engineBufferMatch = (engineRenderWidth === expectedEngineW && engineRenderHeight === expectedEngineH);
+        // Engine render === buffer? (direct comparison)
+        // Babylon's getRenderWidth() returns the actual render buffer size,
+        // which should match canvas buffer size after proper initialization.
+        const engineBufferMatch = (engineRenderWidth === canvasBufferWidth && engineRenderHeight === canvasBufferHeight);
 
         // Post-process state
         const camera = this.scene.activeCamera;

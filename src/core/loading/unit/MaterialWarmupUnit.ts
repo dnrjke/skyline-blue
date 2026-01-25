@@ -98,6 +98,10 @@ export class MaterialWarmupUnit extends BaseLoadUnit {
                     progress: (i + 1) / materials.length,
                     message: `Compiled ${i + 1}/${materials.length}`,
                 });
+
+                // Task fragmentation: yield to browser between heavy shader compilations
+                // This prevents RAF throttling due to main thread congestion
+                await new Promise<void>((r) => setTimeout(r, 0));
             }
         } finally {
             dummy.dispose();

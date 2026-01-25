@@ -43,8 +43,7 @@ const STABLE_FRAME_COUNT = 8;
 const PHYSICAL_READY_SUSTAIN_MS = 500;
 
 /** Maximum RAF dt for stable cadence */
-// MAX_STABLE_RAF_DT_MS removed: C3 is no longer a blocking condition.
-// RAF cadence data is still captured for informational reporting.
+const MAX_STABLE_RAF_DT_MS = 42; // ~24fps minimum
 
 /** RAF frequency lock detection: consecutive frames within tolerance */
 const FREQ_LOCK_TOLERANCE_MS = 5;
@@ -616,9 +615,8 @@ export class PhysicalReadyFlightRecorderProbe {
             // C2: Engine/canvas buffer size converged (direct match)
             this.checkSizeConverged(canvasBufW, canvasBufH, engineW, engineH, hwScale),
 
-            // C3: RAF cadence (informational only — not blocking since v2 barrier handles throttle)
-            // Chrome throttles RAF to ~102ms; barrier v2 uses consistency detection.
-            true,
+            // C3: RAF cadence stable
+            rafDt > 0 && rafDt <= MAX_STABLE_RAF_DT_MS,
 
             // C4: At least one resize event
             this.totalResizeCount > 0,
@@ -878,7 +876,7 @@ export class PhysicalReadyFlightRecorderProbe {
         const readyEvt = this.timeline.find(e => e.type === 'PHYSICAL_READY') as PhysicalReadyEvent | undefined;
 
         // Per-condition fail analysis
-        const conditionNames = ['C1:CanvasBuf>0', 'C2:SizeConverged', 'C3:RAF(info)', 'C4:ResizeOccurred', 'C5:Visible', 'C6:HwScaleStable', 'C7:DPR>0', 'C8:NoAnomalies'];
+        const conditionNames = ['C1:CanvasBuf>0', 'C2:SizeConverged', 'C3:RAFStable', 'C4:ResizeOccurred', 'C5:Visible', 'C6:HwScaleStable', 'C7:DPR>0', 'C8:NoAnomalies'];
         const conditionFails: ConditionFailAnalysis[] = conditionNames.map((name, i) => {
             const key = `C${i + 1}` as keyof PhysicalProbeEvent;
             let failFrames = 0;
@@ -1064,10 +1062,12 @@ export class PhysicalReadyFlightRecorderProbe {
                 })));
             }
 
-            // Note: C3 (RAF cadence) is now informational only (always passes).
-            // RAF throttle is handled by EngineAwakenedBarrier v2 consistency detection.
+            // Correlation: did RAF_SLOW prevent PHYSICAL_READY?
             if (!summary.physicalReadyAchieved) {
-                console.log('>>> PHYSICAL_READY not achieved — check C1/C2/C4/C6 conditions');
+                const c3Fails = summary.conditionFails[2]; // C3: RAF stable
+                console.log(`C3(RAF stable) failed ${c3Fails.failFrames} frames (${c3Fails.failPercent}%) — ` +
+                    `longest streak: ${c3Fails.longestFailStreak} frames`);
+                console.log('>>> RAF_SLOW is likely a PRIMARY blocker for PHYSICAL_READY');
             }
             console.groupEnd();
         }

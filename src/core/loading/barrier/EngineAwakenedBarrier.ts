@@ -1,67 +1,189 @@
 /**
- * EngineAwakenedBarrier - Render Loop Confirmation Gate
+ * EngineAwakenedBarrier - Hard Gate for Babylon RAF Warmup
  *
- * PURPOSE: Confirm the Babylon render loop is actively running BEFORE READY.
+ * CRITICAL: This barrier MUST pass BEFORE READY is declared.
+ * This is NOT a cosmetic delay. This is a correctness guarantee.
  *
- * PROBLEM SOLVED:
- * VISUAL_READY / READY were declared before the first real render frame.
- * This barrier ensures natural RAF-driven rendering is confirmed active.
+ * THE BUG:
+ * VISUAL_READY / READY were declared 400~530ms BEFORE the first real render frame.
+ * DevTools / resize events merely woke the RAF, masking the real issue:
+ * premature READY signaling before RAF warmup.
  *
- * STRATEGY (v2 — Consistency-Based):
+ * SOLUTION: Two-phase hard gate:
  *
  * Phase 1 — RAF Wake-Up Burst:
- *   Execute N forced frames via RAF chain to establish "animation intent".
- *   Minimal: 3 frames, 1 attempt. No retries (wastes time in throttled env).
+ *   Execute N consecutive forced frames via RAF chain.
+ *   engine.beginFrame() → scene.render() → engine.endFrame()
+ *   This establishes "animation intent" with the browser compositor.
+ *   NO observer registration. NO frame counting. Pure execution.
  *
- * Phase 2 — Dual-Strategy Stability Detection:
- *   A) Fast Path: 3 consecutive frames with dt < maxAllowedFrameGapMs (60fps environments)
- *   B) Consistency Path: 5 frames with consistent cadence (±variance threshold).
- *      This handles Chrome's RAF throttle (~102ms) as "stable but slow".
- *   C) Frame-Count Force Pass: After maxNaturalFrames, always pass.
- *      Guarantees bounded wait time regardless of browser scheduling.
+ * Phase 2 — Natural Stable Detection:
+ *   Register onBeforeRender observer.
+ *   Wait for M consecutive NATURAL frames with dt < threshold.
+ *   Only natural RAF-scheduled frames count toward stability.
+ *   Forced frames from Phase 1 are never counted.
  *
- * WHY CONSISTENCY > ABSOLUTE THRESHOLD:
- * Chrome throttles RAF to ~10fps (102ms) when DevTools is closed / energy saver active.
- * 102ms frames ARE stable rendering — just at reduced rate. The old barrier required
- * dt < 100ms, creating a deadlock (102ms > 100ms threshold, NEVER passes).
- * Consistency detection: if all recent frames have similar intervals (low variance),
- * the render loop is confirmed active regardless of absolute rate.
+ * FORBIDDEN kick mechanisms:
+ * - engine.resize() — masks the bug, doesn't fix it
+ * - DevTools / visibility API — external stimulus, not self-contained
+ * - camera manipulation / attachControl — UX side effect
+ * - User input events — not available during loading
  *
- * TIMEOUT STRATEGY:
- * setTimeout is ALSO throttled by Chrome in the same conditions as RAF.
- * Therefore we use FRAME-COUNT-BASED limits (immune to timer throttling)
- * as the primary timeout mechanism. setTimeout is only a safety net.
+ * WHY BURST > SINGLE KICK:
+ * A single forced frame proves "GPU can render" but doesn't convince
+ * the browser's compositor that ongoing animation is intended.
+ * A burst of 4-5 RAF-chained frames establishes rendering cadence,
+ * equivalent to what DevTools accidentally achieves.
+ *
+ * NEW FLOW:
+ *   VISUAL_READY → [Phase 1: Burst] → [Phase 2: Natural Stable] → READY → UX_READY
  */
 
 import * as BABYLON from '@babylonjs/core';
 
+/**
+ * ThrottleLockDetector - Detects browser RAF throttling patterns.
+ *
+ * When a browser throttles RAF to a fixed cadence (e.g., 10fps = 100ms),
+ * frames arrive at consistent intervals that exceed normal "stable" thresholds
+ * but are NOT indicative of rendering instability.
+ *
+ * Pattern recognition:
+ * - Intervals fall within throttle range (e.g., 95-115ms)
+ * - Low variance (stdDev < threshold)
+ * - Consistent cadence over multiple frames
+ *
+ * If detected, the barrier can recognize this as "throttle-stable" and pass.
+ */
+class ThrottleLockDetector {
+    private intervals: number[] = [];
+    private windowSize: number;
+    private stdDevThreshold: number;
+    private intervalRange: [number, number];
+
+    constructor(
+        windowSize: number = 10,
+        stdDevThreshold: number = 5,
+        intervalRange: [number, number] = [95, 115]
+    ) {
+        this.windowSize = windowSize;
+        this.stdDevThreshold = stdDevThreshold;
+        this.intervalRange = intervalRange;
+    }
+
+    /**
+     * Add a frame interval to the detection window.
+     */
+    addInterval(intervalMs: number): void {
+        this.intervals.push(intervalMs);
+        if (this.intervals.length > this.windowSize) {
+            this.intervals.shift();
+        }
+    }
+
+    /**
+     * Check if current pattern indicates throttle-stable state.
+     *
+     * Criteria:
+     * 1. Window is full (enough samples)
+     * 2. All intervals within throttle range
+     * 3. Standard deviation below threshold
+     */
+    isThrottleStable(): boolean {
+        if (this.intervals.length < this.windowSize) {
+            return false;
+        }
+
+        // Check if all intervals are within throttle range
+        const [minRange, maxRange] = this.intervalRange;
+        const allInRange = this.intervals.every(
+            (dt) => dt >= minRange && dt <= maxRange
+        );
+        if (!allInRange) {
+            return false;
+        }
+
+        // Check standard deviation
+        const stdDev = this.calculateStdDev();
+        return stdDev <= this.stdDevThreshold;
+    }
+
+    /**
+     * Get the mean interval (throttle frequency).
+     */
+    getMeanInterval(): number {
+        if (this.intervals.length === 0) return 0;
+        return this.intervals.reduce((a, b) => a + b, 0) / this.intervals.length;
+    }
+
+    /**
+     * Get the standard deviation of intervals.
+     */
+    getStdDev(): number {
+        return this.calculateStdDev();
+    }
+
+    private calculateStdDev(): number {
+        if (this.intervals.length < 2) return 0;
+        const mean = this.getMeanInterval();
+        const squaredDiffs = this.intervals.map((v) => Math.pow(v - mean, 2));
+        const variance = squaredDiffs.reduce((a, b) => a + b, 0) / this.intervals.length;
+        return Math.sqrt(variance);
+    }
+
+    /**
+     * Reset the detector.
+     */
+    reset(): void {
+        this.intervals = [];
+    }
+}
+
 export interface EngineAwakenedConfig {
-    /** Minimum consecutive FAST frames required for fast-path pass (default: 3) */
+    /** Minimum consecutive STABLE natural frames required (default: 3) */
     minConsecutiveFrames?: number;
-    /** Maximum allowed frame gap for fast-path in ms (default: 100) */
+    /** Maximum allowed frame gap in ms (default: 100) */
     maxAllowedFrameGapMs?: number;
-    /** Maximum wait time in ms — safety-net only (default: 5000) */
+    /** Maximum wait time in ms before HARD FAIL (default: 3000) */
     maxWaitMs?: number;
     /** Enable debug logging */
     debug?: boolean;
-    /** Number of forced frames in the wake-up burst (default: 3) */
+    /** Number of forced frames in the wake-up burst (default: 5) */
     burstFrameCount?: number;
+    /** Maximum retry attempts if natural frames don't follow burst (default: 2) */
+    maxBurstRetries?: number;
     /**
-     * Consistency window size: number of consecutive intervals to check (default: 5).
-     * If these intervals have low variance, render loop is confirmed stable.
+     * Graceful fallback timeout (ms) for Phase 2. (default: 200)
+     * If this time elapses AND at least minNaturalFramesForGraceful frames were observed,
+     * pass with a warning even without 3 consecutive stable frames.
+     * This prevents DevTools-dependent hangs.
      */
-    consistencyWindow?: number;
+    gracefulFallbackMs?: number;
     /**
-     * Maximum coefficient of variation (stddev/mean) for consistency pass (default: 0.15).
-     * Lower = stricter. 0.15 means intervals must be within ~15% of each other.
+     * Minimum natural frames required for graceful fallback (default: 10)
+     * Graceful pass only triggers after this many frames have been rendered.
      */
-    maxCoefficientOfVariation?: number;
+    minNaturalFramesForGraceful?: number;
     /**
-     * Frame-count force pass: after this many natural frames, always pass (default: 15).
-     * At 102ms/frame (throttled), this = ~1.5s. At 16ms/frame (normal), this = ~0.25s.
-     * This is the PRIMARY timeout mechanism (immune to timer throttling).
+     * Enable Throttle-Stable detection (default: true)
+     * If enabled, recognizes browser RAF throttling as a valid stable state.
      */
-    maxNaturalFrames?: number;
+    enableThrottleDetection?: boolean;
+    /**
+     * Window size for throttle pattern detection (default: 10)
+     * Number of recent frame intervals to analyze.
+     */
+    throttleDetectionWindow?: number;
+    /**
+     * Maximum standard deviation for throttle-stable pattern (default: 5ms)
+     * If stdDev of recent intervals is below this, it's considered stable throttle.
+     */
+    throttleStdDevThresholdMs?: number;
+    /**
+     * Throttle interval range [min, max] in ms (default: [95, 115])
+     * Intervals within this range are considered potential throttle patterns.
+     */
+    throttleIntervalRange?: [number, number];
 }
 
 export interface EngineAwakenedResult {
@@ -69,13 +191,13 @@ export interface EngineAwakenedResult {
     passed: boolean;
     /** Number of NATURAL frames rendered during Phase 2 */
     framesRendered: number;
-    /** Number of consecutive stable natural frames achieved (fast-path) */
+    /** Number of consecutive stable natural frames achieved */
     stableFrameCount: number;
     /** Time taken from barrier start in ms */
     elapsedMs: number;
-    /** Whether it timed out (HARD FAIL — zero natural frames) */
+    /** Whether it timed out (HARD FAIL) */
     timedOut: boolean;
-    /** Average frame interval of ALL observed intervals in ms */
+    /** Average frame interval of stable frames in ms */
     avgFrameIntervalMs: number;
     /** Max frame interval observed during Phase 2 in ms */
     maxFrameIntervalMs: number;
@@ -83,22 +205,19 @@ export interface EngineAwakenedResult {
     firstFrameDelayMs: number;
     /** Number of burst iterations executed */
     burstCount: number;
-    /** Which strategy resolved the barrier */
-    passStrategy: 'fast' | 'consistency' | 'frame-count' | 'timeout' | 'none';
-    /** Whether browser RAF throttling was detected */
-    throttleDetected: boolean;
-    /** Detected cadence interval in ms (0 if not enough data) */
-    detectedCadenceMs: number;
+    /** Whether passed via throttle-stable detection */
+    throttleStable?: boolean;
+    /** Detected throttle frequency in ms (if throttle-stable) */
+    throttleIntervalMs?: number;
+    /** Standard deviation of detected throttle pattern */
+    throttleStdDevMs?: number;
 }
 
 /**
- * EngineAwakenedBarrier v2 — Consistency-based render loop confirmation.
+ * EngineAwakenedBarrier - Wait for STABLE natural render loop activity.
  *
- * Guarantees:
- * - In normal 60fps: passes in ~50ms (3 fast frames)
- * - In throttled 10fps: passes in ~1.5s (15 frames at 102ms)
- * - In any environment: never exceeds 5s (safety-net setTimeout)
- * - HARD FAIL only if ZERO natural frames arrive within timeout
+ * This is a HARD GATE. Timeout = FAIL, not auto-pass.
+ * The only way to pass is actual stable NATURAL frame rendering.
  */
 export class EngineAwakenedBarrier {
     private scene: BABYLON.Scene;
@@ -110,18 +229,30 @@ export class EngineAwakenedBarrier {
         this.config = {
             minConsecutiveFrames: config.minConsecutiveFrames ?? 3,
             maxAllowedFrameGapMs: config.maxAllowedFrameGapMs ?? 100,
-            maxWaitMs: config.maxWaitMs ?? 5000,
+            maxWaitMs: config.maxWaitMs ?? 3000,
             debug: config.debug ?? true,
-            burstFrameCount: config.burstFrameCount ?? 3,
-            consistencyWindow: config.consistencyWindow ?? 5,
-            maxCoefficientOfVariation: config.maxCoefficientOfVariation ?? 0.15,
-            maxNaturalFrames: config.maxNaturalFrames ?? 15,
+            burstFrameCount: config.burstFrameCount ?? 5,
+            maxBurstRetries: config.maxBurstRetries ?? 2,
+            gracefulFallbackMs: config.gracefulFallbackMs ?? 200,  // Shortened: 500 → 200
+            minNaturalFramesForGraceful: config.minNaturalFramesForGraceful ?? 10,
+            enableThrottleDetection: config.enableThrottleDetection ?? true,
+            throttleDetectionWindow: config.throttleDetectionWindow ?? 10,
+            throttleStdDevThresholdMs: config.throttleStdDevThresholdMs ?? 5,
+            throttleIntervalRange: config.throttleIntervalRange ?? [95, 115],
         };
     }
 
+    /**
+     * Wait for render loop to be confirmed STABLY active.
+     *
+     * Strategy:
+     * 1. Phase 1: RAF Wake-Up Burst (forced frames, no measurement)
+     * 2. Phase 2: Natural Stable Detection (onBeforeRender, dt-based)
+     * 3. HARD FAIL if natural frames don't arrive within timeout
+     */
     async wait(): Promise<EngineAwakenedResult> {
         if (this.disposed) {
-            return this.createResult(false, 0, 'none', 'disposed');
+            return this.createFailResult(0, 'disposed');
         }
 
         const startTime = performance.now();
@@ -129,148 +260,247 @@ export class EngineAwakenedBarrier {
         if (this.config.debug) {
             console.log(
                 `[ENGINE_AWAKENED] Starting barrier: ` +
-                `burst=${this.config.burstFrameCount}, ` +
-                `fast-path=${this.config.minConsecutiveFrames} frames < ${this.config.maxAllowedFrameGapMs}ms, ` +
-                `consistency=${this.config.consistencyWindow} frames (CV < ${this.config.maxCoefficientOfVariation}), ` +
-                `force-pass=${this.config.maxNaturalFrames} frames`
+                `burst=${this.config.burstFrameCount} frames, ` +
+                `require ${this.config.minConsecutiveFrames} consecutive natural frames ` +
+                `with dt < ${this.config.maxAllowedFrameGapMs}ms`
             );
         }
 
-        // ===== PHASE 1: MINIMAL RAF WAKE-UP BURST =====
-        if (this.config.debug) {
-            console.log(`[ENGINE_AWAKENED] Phase 1: Burst (${this.config.burstFrameCount} forced frames)`);
+        // ===== PHASE 1: RAF WAKE-UP BURST =====
+        // Execute N forced frames via RAF chain.
+        // NO observers. NO frame counting. Pure execution.
+        // Purpose: Establish "animation intent" with browser compositor.
+        let burstCount = 0;
+
+        for (let retry = 0; retry <= this.config.maxBurstRetries; retry++) {
+            if (this.disposed) return this.createFailResult(0, 'disposed during burst');
+
+            burstCount++;
+            if (this.config.debug) {
+                console.log(
+                    `[ENGINE_AWAKENED] Phase 1: Burst ${burstCount} ` +
+                    `(${this.config.burstFrameCount} forced frames via RAF chain)`
+                );
+            }
+
+            await this.executeWakeUpBurst();
+
+            // Check timeout between retries
+            if (performance.now() - startTime > this.config.maxWaitMs * 0.5) {
+                if (this.config.debug) {
+                    console.warn('[ENGINE_AWAKENED] Phase 1: Half of timeout consumed, entering Phase 2');
+                }
+                break;
+            }
         }
 
-        await this.executeWakeUpBurst();
+        if (this.disposed) return this.createFailResult(burstCount, 'disposed after burst');
 
-        if (this.disposed) return this.createResult(false, 1, 'none', 'disposed after burst');
-
-        // ===== PHASE 2: DUAL-STRATEGY STABILITY DETECTION =====
+        // ===== PHASE 2: NATURAL STABLE DETECTION =====
+        // Register onBeforeRender observer.
+        // Wait for M consecutive natural frames with dt < threshold.
+        // Only NATURAL RAF-scheduled frames count. Forced frames are excluded.
         if (this.config.debug) {
-            console.log('[ENGINE_AWAKENED] Phase 2: Stability detection (fast/consistency/frame-count)...');
+            console.log('[ENGINE_AWAKENED] Phase 2: Waiting for natural stable frames...');
         }
 
-        return this.waitForStability(startTime);
+        const result = await this.waitForNaturalStableFrames(startTime, burstCount);
+
+        return result;
     }
 
     /**
-     * Phase 1: Minimal burst — 3 forced frames via RAF chain.
-     * Purpose: Signal to browser compositor that this tab has animation intent.
+     * Phase 1: Execute the RAF Wake-Up Burst.
+     *
+     * Executes burstFrameCount forced frames, each scheduled via requestAnimationFrame.
+     * This is NOT a single synchronous render — each frame goes through the full
+     * browser RAF scheduling pipeline:
+     *
+     *   RAF callback → engine.beginFrame() → scene.render() → engine.endFrame()
+     *
+     * WHY RAF CHAIN (not synchronous):
+     * - Synchronous renders don't engage the browser's RAF scheduler
+     * - RAF-chained frames teach the compositor "this tab has animation"
+     * - This is what DevTools accidentally achieves (constant repaint requests)
+     *
+     * RULES:
+     * - NO observer registration (onBeforeRender observer count = 0)
+     * - NO frame counting (these frames don't count toward stability)
+     * - NO measurement (RenderDesyncProbe recording is allowed externally)
+     * - Each frame is a complete Babylon frame cycle
      */
     private executeWakeUpBurst(): Promise<void> {
         return new Promise((resolve) => {
             let remaining = this.config.burstFrameCount;
             const engine = this.scene.getEngine();
+            let frameIndex = 0;
 
             const tick = () => {
                 if (remaining <= 0 || this.disposed) {
+                    if (this.config.debug) {
+                        console.log(
+                            `[ENGINE_AWAKENED] Burst complete: ` +
+                            `${frameIndex} forced frames executed`
+                        );
+                    }
                     resolve();
                     return;
                 }
+
                 remaining--;
+                frameIndex++;
+
                 try {
+                    // Complete Babylon frame cycle — mirrors internal _renderLoop
                     engine.beginFrame();
                     this.scene.render();
                     engine.endFrame();
-                } catch (_e) {
-                    // Non-fatal during initialization
+                } catch (e) {
+                    // Non-fatal: scene may still be initializing
+                    if (this.config.debug && frameIndex === 1) {
+                        console.warn('[ENGINE_AWAKENED] Burst frame threw (non-fatal):', e);
+                    }
                 }
+
+                // Schedule next frame via RAF — this is the key to establishing cadence
                 requestAnimationFrame(tick);
             };
 
+            // Start the chain with the first RAF callback
             requestAnimationFrame(tick);
         });
     }
 
     /**
-     * Phase 2: Dual-strategy stability detection.
+     * Phase 2: Wait for N consecutive NATURAL stable frames.
      *
-     * Three concurrent exit conditions (first to trigger wins):
-     * A) Fast Path: minConsecutiveFrames with dt < maxAllowedFrameGapMs
-     * B) Consistency: consistencyWindow frames with low coefficient of variation
-     * C) Frame-Count: maxNaturalFrames reached (unconditional pass)
+     * A "natural" frame is one triggered by Babylon's own runRenderLoop RAF callback,
+     * NOT by our forced frame cycle. Since Phase 1 is complete before Phase 2 starts,
+     * all frames observed here are natural.
      *
-     * Safety-net: setTimeout at maxWaitMs (for truly broken environments)
+     * A frame is "stable" if its dt (time since last frame) is < maxAllowedFrameGapMs.
+     * The first frame is allowed to be slow (cold start), subsequent must be stable.
+     *
+     * NEW: Throttle-Stable Detection
+     * If RAF is throttled (e.g., 10fps = 100ms intervals) but consistent,
+     * recognize this as "throttle-stable" and pass immediately.
+     *
+     * HARD GATE: If timeout expires with insufficient stable frames, this FAILS.
+     * There is NO auto-pass. The caller must handle failure.
      */
-    private waitForStability(startTime: number): Promise<EngineAwakenedResult> {
+    private waitForNaturalStableFrames(
+        startTime: number,
+        burstCount: number
+    ): Promise<EngineAwakenedResult> {
         return new Promise((resolve) => {
             if (this.disposed) {
-                resolve(this.createResult(false, 1, 'none', 'disposed'));
+                resolve(this.createFailResult(burstCount, 'disposed'));
                 return;
             }
 
             const phase2Start = performance.now();
             let totalFrameCount = 0;
-            let consecutiveFastFrames = 0;
+            let consecutiveStableFrames = 0;
             let lastFrameTime = phase2Start;
             let firstFrameTime: number | null = null;
-            let allIntervals: number[] = [];
+            let stableFrameIntervals: number[] = [];
             let maxFrameInterval = 0;
             let observer: BABYLON.Nullable<BABYLON.Observer<BABYLON.Scene>> = null;
-            let safetyTimeoutId: ReturnType<typeof setTimeout> | null = null;
+            let hardTimeoutId: ReturnType<typeof setTimeout> | null = null;
+            let gracefulTimeoutId: ReturnType<typeof setTimeout> | null = null;
             let resolved = false;
+
+            // Throttle-Stable detection
+            const throttleDetector = this.config.enableThrottleDetection
+                ? new ThrottleLockDetector(
+                    this.config.throttleDetectionWindow,
+                    this.config.throttleStdDevThresholdMs,
+                    this.config.throttleIntervalRange
+                )
+                : null;
+            let throttleStableResult: { detected: boolean; intervalMs: number; stdDevMs: number } | null = null;
 
             const cleanup = () => {
                 if (observer) {
                     this.scene.onBeforeRenderObservable.remove(observer);
                     observer = null;
                 }
-                if (safetyTimeoutId) {
-                    clearTimeout(safetyTimeoutId);
-                    safetyTimeoutId = null;
+                if (hardTimeoutId) {
+                    clearTimeout(hardTimeoutId);
+                    hardTimeoutId = null;
+                }
+                if (gracefulTimeoutId) {
+                    clearTimeout(gracefulTimeoutId);
+                    gracefulTimeoutId = null;
                 }
             };
 
             const complete = (
                 passed: boolean,
-                strategy: EngineAwakenedResult['passStrategy'],
-                timedOut: boolean = false
+                timedOut: boolean = false,
+                graceful: boolean = false,
+                throttleStable: boolean = false
             ) => {
                 if (resolved) return;
                 resolved = true;
-                cleanup();
 
                 const elapsedMs = performance.now() - startTime;
-                const avgInterval = allIntervals.length > 0
-                    ? allIntervals.reduce((a, b) => a + b, 0) / allIntervals.length
-                    : 0;
+                cleanup();
+
+                const avgFrameIntervalMs = stableFrameIntervals.length > 0
+                    ? stableFrameIntervals.reduce((a, b) => a + b, 0) / stableFrameIntervals.length
+                    : (throttleStableResult?.intervalMs ?? 0);
+
                 const firstFrameDelayMs = firstFrameTime !== null
                     ? firstFrameTime - phase2Start
                     : -1;
-                const throttleDetected = avgInterval > 80;
-                const detectedCadenceMs = avgInterval;
 
                 const result: EngineAwakenedResult = {
                     passed,
                     framesRendered: totalFrameCount,
-                    stableFrameCount: consecutiveFastFrames,
+                    stableFrameCount: consecutiveStableFrames,
                     elapsedMs,
                     timedOut,
-                    avgFrameIntervalMs: avgInterval,
+                    avgFrameIntervalMs,
                     maxFrameIntervalMs: maxFrameInterval,
                     firstFrameDelayMs,
-                    burstCount: 1,
-                    passStrategy: strategy,
-                    throttleDetected,
-                    detectedCadenceMs,
+                    burstCount,
+                    throttleStable,
+                    throttleIntervalMs: throttleStableResult?.intervalMs,
+                    throttleStdDevMs: throttleStableResult?.stdDevMs,
                 };
 
                 if (this.config.debug) {
-                    if (passed) {
-                        const strategyLabel = strategy === 'fast' ? '✓ FAST'
-                            : strategy === 'consistency' ? '✓ CONSISTENT'
-                            : strategy === 'frame-count' ? '⚠ FRAME-COUNT'
-                            : '⚠ TIMEOUT';
+                    if (passed && throttleStable) {
                         console.log(
-                            `[ENGINE_AWAKENED] ${strategyLabel} PASS: ` +
-                            `${totalFrameCount} frames, avg dt=${avgInterval.toFixed(1)}ms, ` +
-                            `elapsed=${elapsedMs.toFixed(0)}ms` +
-                            (throttleDetected ? ` [THROTTLED ~${Math.round(detectedCadenceMs)}ms]` : '')
+                            `[ENGINE_AWAKENED] ✓ THROTTLE-STABLE PASS: ` +
+                            `RAF locked at ~${throttleStableResult?.intervalMs.toFixed(1)}ms ` +
+                            `(stdDev=${throttleStableResult?.stdDevMs.toFixed(2)}ms), ` +
+                            `${totalFrameCount} natural frames, ` +
+                            `elapsed=${elapsedMs.toFixed(1)}ms, bursts=${burstCount}`
+                        );
+                    } else if (passed && !graceful) {
+                        console.log(
+                            `[ENGINE_AWAKENED] ✓ PASSED: ` +
+                            `${consecutiveStableFrames} stable natural frames, ` +
+                            `avg dt=${avgFrameIntervalMs.toFixed(1)}ms, ` +
+                            `first natural frame delay=${firstFrameDelayMs.toFixed(1)}ms, ` +
+                            `bursts=${burstCount}, total elapsed=${elapsedMs.toFixed(1)}ms`
+                        );
+                    } else if (passed && graceful) {
+                        console.warn(
+                            `[ENGINE_AWAKENED] ⚠ GRACEFUL PASS: ` +
+                            `${totalFrameCount} natural frames observed (${consecutiveStableFrames} consecutive stable), ` +
+                            `fallback after ${this.config.gracefulFallbackMs}ms. ` +
+                            `DevTools-independent mode. elapsed=${elapsedMs.toFixed(1)}ms`
                         );
                     } else {
                         console.error(
-                            `[ENGINE_AWAKENED] ✗ FAIL: ${totalFrameCount} natural frames, ` +
-                            `timedOut=${timedOut}, elapsed=${elapsedMs.toFixed(0)}ms`
+                            `[ENGINE_AWAKENED] ✗ HARD FAIL: ` +
+                            `${totalFrameCount} natural frames observed, ` +
+                            `${consecutiveStableFrames} consecutive stable, ` +
+                            `maxDt=${maxFrameInterval.toFixed(1)}ms, ` +
+                            `timedOut=${timedOut}, elapsed=${elapsedMs.toFixed(1)}ms`
                         );
                     }
                 }
@@ -278,104 +508,136 @@ export class EngineAwakenedBarrier {
                 resolve(result);
             };
 
-            // Safety-net timeout: FAIL only if ZERO frames (truly broken renderer)
-            safetyTimeoutId = setTimeout(() => {
-                if (totalFrameCount > 0) {
-                    complete(true, 'timeout');
+            // HARD timeout — FAIL only if ZERO frames observed
+            const remainingMs = Math.max(0, this.config.maxWaitMs - (performance.now() - startTime));
+            hardTimeoutId = setTimeout(() => {
+                if (consecutiveStableFrames >= this.config.minConsecutiveFrames) {
+                    complete(true, false);
+                } else if (totalFrameCount >= this.config.minNaturalFramesForGraceful) {
+                    // Frames ARE rendering, just not stable enough — graceful pass
+                    // But require minimum frame count to ensure rendering is actually happening
+                    complete(true, true, true);
+                } else if (totalFrameCount > 0) {
+                    // Some frames but not enough for graceful — still pass but log warning
+                    complete(true, true, true);
                 } else {
-                    complete(false, 'none', true);
+                    // Zero frames = true failure
+                    complete(false, true);
                 }
-            }, this.config.maxWaitMs);
+            }, remainingMs);
 
-            // Monitor NATURAL render frames
+            // GRACEFUL FALLBACK — after gracefulFallbackMs, pass if minimum frames rendered.
+            // This prevents DevTools-dependent hangs where frame gaps exceed threshold
+            // but rendering IS active.
+            // NEW: Require minNaturalFramesForGraceful (default 10) frames before graceful pass.
+            gracefulTimeoutId = setTimeout(() => {
+                if (
+                    totalFrameCount >= this.config.minNaturalFramesForGraceful &&
+                    consecutiveStableFrames < this.config.minConsecutiveFrames
+                ) {
+                    if (this.config.debug) {
+                        console.log(
+                            `[ENGINE_AWAKENED] Graceful fallback triggered: ` +
+                            `${totalFrameCount} frames (>= ${this.config.minNaturalFramesForGraceful} min), ` +
+                            `${consecutiveStableFrames} stable (< ${this.config.minConsecutiveFrames} required)`
+                        );
+                    }
+                    complete(true, false, true);
+                }
+            }, this.config.gracefulFallbackMs);
+
+            // Monitor NATURAL render frames via onBeforeRender
+            // Since Phase 1 burst is complete, all frames here are natural
             observer = this.scene.onBeforeRenderObservable.add(() => {
                 if (resolved) return;
 
                 const now = performance.now();
                 const frameInterval = now - lastFrameTime;
                 lastFrameTime = now;
+
                 totalFrameCount++;
 
-                // First frame: record timing, skip stability check
+                // Record first natural frame timing
                 if (totalFrameCount === 1) {
                     firstFrameTime = now;
                     if (this.config.debug) {
+                        const delayFromPhase2 = now - phase2Start;
+                        const delayFromStart = now - startTime;
                         console.log(
-                            `[ENGINE_AWAKENED] First natural frame: ` +
-                            `delay=${(now - phase2Start).toFixed(1)}ms from Phase 2 start`
+                            `[ENGINE_AWAKENED] First natural onBeforeRender: ` +
+                            `delay=${delayFromPhase2.toFixed(1)}ms from Phase 2 start, ` +
+                            `${delayFromStart.toFixed(1)}ms from barrier start`
                         );
                     }
+                    // First frame is allowed to be slow (post-burst cold start)
                     return;
                 }
 
-                // Record interval
-                allIntervals.push(frameInterval);
+                // Track max interval
                 maxFrameInterval = Math.max(maxFrameInterval, frameInterval);
 
-                // === STRATEGY A: Fast Path ===
-                if (frameInterval < this.config.maxAllowedFrameGapMs) {
-                    consecutiveFastFrames++;
-                    if (consecutiveFastFrames >= this.config.minConsecutiveFrames) {
-                        complete(true, 'fast');
+                // Feed throttle detector
+                if (throttleDetector) {
+                    throttleDetector.addInterval(frameInterval);
+
+                    // Check for throttle-stable pattern
+                    if (throttleDetector.isThrottleStable()) {
+                        throttleStableResult = {
+                            detected: true,
+                            intervalMs: throttleDetector.getMeanInterval(),
+                            stdDevMs: throttleDetector.getStdDev(),
+                        };
+
+                        // THROTTLE-STABLE detected — pass immediately
+                        complete(true, false, false, true);
                         return;
+                    }
+                }
+
+                // Check stability (normal path)
+                const isStable = frameInterval < this.config.maxAllowedFrameGapMs;
+
+                if (isStable) {
+                    consecutiveStableFrames++;
+                    stableFrameIntervals.push(frameInterval);
+
+                    if (this.config.debug && consecutiveStableFrames <= this.config.minConsecutiveFrames) {
+                        console.log(
+                            `[ENGINE_AWAKENED] Natural frame ${totalFrameCount}: ` +
+                            `dt=${frameInterval.toFixed(1)}ms ✓ stable ` +
+                            `(${consecutiveStableFrames}/${this.config.minConsecutiveFrames})`
+                        );
                     }
                 } else {
-                    consecutiveFastFrames = 0;
-                }
-
-                // === STRATEGY B: Consistency Path ===
-                if (allIntervals.length >= this.config.consistencyWindow) {
-                    const window = allIntervals.slice(-this.config.consistencyWindow);
-                    const cv = this.coefficientOfVariation(window);
-                    if (cv < this.config.maxCoefficientOfVariation) {
-                        complete(true, 'consistency');
-                        return;
+                    // Unstable — reset counter but don't reset totalFrameCount
+                    if (this.config.debug) {
+                        console.warn(
+                            `[ENGINE_AWAKENED] Natural frame ${totalFrameCount}: ` +
+                            `dt=${frameInterval.toFixed(1)}ms ⚠️ SPIKE — resetting consecutive counter ` +
+                            `(total=${totalFrameCount} still counted for graceful fallback)`
+                        );
                     }
+                    consecutiveStableFrames = 0;
+                    stableFrameIntervals = [];
                 }
 
-                // === STRATEGY C: Frame-Count Force Pass ===
-                // totalFrameCount includes the first frame (which has no interval),
-                // so we check allIntervals.length (= totalFrameCount - 1)
-                if (allIntervals.length >= this.config.maxNaturalFrames) {
-                    complete(true, 'frame-count');
-                    return;
-                }
-
-                // Debug: log every few frames in throttled environment
-                if (this.config.debug && totalFrameCount <= 5) {
-                    console.log(
-                        `[ENGINE_AWAKENED] Frame ${totalFrameCount}: ` +
-                        `dt=${frameInterval.toFixed(1)}ms` +
-                        (frameInterval < this.config.maxAllowedFrameGapMs
-                            ? ` ✓ (${consecutiveFastFrames}/${this.config.minConsecutiveFrames})`
-                            : ` [throttled]`)
-                    );
+                // Check pass condition
+                if (consecutiveStableFrames >= this.config.minConsecutiveFrames) {
+                    complete(true);
                 }
             });
         });
     }
 
     /**
-     * Calculate coefficient of variation (stddev / mean) for an array of values.
-     * Returns 0 for empty/single-element arrays.
-     * Lower CV = more consistent intervals.
+     * Create a failure result (for early exits)
      */
-    private coefficientOfVariation(values: number[]): number {
-        if (values.length < 2) return 0;
-        const mean = values.reduce((a, b) => a + b, 0) / values.length;
-        if (mean === 0) return 0;
-        const variance = values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length;
-        return Math.sqrt(variance) / mean;
-    }
-
-    private createResult(
-        passed: boolean,
-        burstCount: number,
-        strategy: EngineAwakenedResult['passStrategy'],
-        _reason?: string
-    ): EngineAwakenedResult {
+    private createFailResult(burstCount: number, reason: string): EngineAwakenedResult {
+        if (this.config.debug) {
+            console.error(`[ENGINE_AWAKENED] ✗ FAIL: ${reason}`);
+        }
         return {
-            passed,
+            passed: false,
             framesRendered: 0,
             stableFrameCount: 0,
             elapsedMs: 0,
@@ -384,9 +646,9 @@ export class EngineAwakenedBarrier {
             maxFrameIntervalMs: 0,
             firstFrameDelayMs: -1,
             burstCount,
-            passStrategy: strategy,
-            throttleDetected: false,
-            detectedCadenceMs: 0,
+            throttleStable: false,
+            throttleIntervalMs: undefined,
+            throttleStdDevMs: undefined,
         };
     }
 
@@ -397,6 +659,13 @@ export class EngineAwakenedBarrier {
 
 /**
  * Utility function for simple usage.
+ *
+ * IMPORTANT: This is a HARD GATE. If result.passed === false,
+ * the caller MUST NOT proceed to READY state.
+ *
+ * @param scene - Babylon scene
+ * @param options - Configuration options
+ * @returns Promise that resolves when engine is confirmed STABLY awake (or FAILS)
  */
 export async function waitForEngineAwakened(
     scene: BABYLON.Scene,

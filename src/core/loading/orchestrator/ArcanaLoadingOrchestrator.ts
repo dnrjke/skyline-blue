@@ -54,6 +54,17 @@ export interface OrchestratorCallbacks {
 
     /** Called on error */
     onError?: (error: Error) => void;
+
+    /**
+     * Called when a LoadUnit starts loading (for forensic logging).
+     * Use this to identify which unit is consuming CPU when stalls occur.
+     */
+    onUnitStart?: (unitId: string, displayName: string, phase: LoadingPhase) => void;
+
+    /**
+     * Called when a LoadUnit completes loading (for forensic logging).
+     */
+    onUnitEnd?: (unitId: string, success: boolean, elapsedMs: number) => void;
 }
 
 /**
@@ -217,6 +228,9 @@ export class ArcanaLoadingOrchestrator {
                         : unit.id;
                     this.progressModel.updateUnitStatus(unit.id, status, displayName);
                 },
+                // Forensic logging: pipe unit lifecycle events to caller
+                onUnitStart: callbacks.onUnitStart,
+                onUnitEnd: callbacks.onUnitEnd,
                 barrierValidation: this.config.barrierValidation,
                 onAfterReady: () => {
                     callbacks.onReady?.();

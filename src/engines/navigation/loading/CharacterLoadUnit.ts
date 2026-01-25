@@ -150,21 +150,33 @@ export class CharacterLoadUnit extends BaseLoadUnit {
             onProgress?.({ progress: 0.9, message: 'Registering animations...' });
 
             // Register animation groups
+            // Task fragmentation: yield between registrations to prevent main thread congestion
             for (const animGroup of result.animationGroups) {
                 const name = animGroup.name;
                 this.animationGroups.set(name, animGroup);
                 // Stop all animations initially
                 animGroup.stop();
                 console.log(`[CharacterLoadUnit] Registered animation: ${name}`);
+
+                // Yield to browser after each animation registration
+                await new Promise<void>((r) => setTimeout(r, 0));
             }
 
             // Apply metadata for picking
+            // Task fragmentation: yield periodically for large mesh counts
+            let meshCount = 0;
             for (const mesh of this.meshes) {
                 mesh.metadata = {
                     ...mesh.metadata,
                     isFlightCharacter: true,
                     characterName: this.config.characterName,
                 };
+                meshCount++;
+
+                // Yield every 5 meshes to prevent blocking
+                if (meshCount % 5 === 0) {
+                    await new Promise<void>((r) => setTimeout(r, 0));
+                }
             }
 
             onProgress?.({ progress: 1, message: 'Character loaded' });
