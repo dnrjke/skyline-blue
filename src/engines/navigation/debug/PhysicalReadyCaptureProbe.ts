@@ -40,7 +40,8 @@ const RING_BUFFER_CAPACITY = 1800;
 const POST_TRIGGER_FRAMES = 300;
 
 /** PHYSICAL_READY conditions: max RAF dt for stable cadence */
-const MAX_STABLE_RAF_DT_MS = 42; // ~24fps minimum acceptable
+// MAX_STABLE_RAF_DT_MS removed: C3 is no longer a blocking condition.
+// RAF cadence data is still captured for informational reporting.
 
 /** Consecutive stable frames required for confirmed first-true */
 const CONFIRMED_STABLE_FRAMES = 8;
@@ -745,8 +746,10 @@ export class PhysicalReadyCaptureProbe {
             frame.engineRenderWidth === frame.canvasBufferWidth &&
             frame.engineRenderHeight === frame.canvasBufferHeight,
 
-            // C3: RAF cadence stable (not throttled)
-            frame.independentRafDt > 0 && frame.independentRafDt <= MAX_STABLE_RAF_DT_MS,
+            // C3: RAF cadence (informational only — not blocking since v2 barrier handles throttle)
+            // Chrome throttles RAF to ~102ms when DevTools closed / energy saver.
+            // EngineAwakenedBarrier v2 detects this via consistency, so probes don't block.
+            true,
 
             // C4: At least one resize event has occurred
             this.totalResizeCount > 0,
