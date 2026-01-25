@@ -397,15 +397,6 @@ export class NavigationScene {
 
             dbg?.begin('LOADING');
 
-            // GPU Pressure Reduction: Lower resolution during loading to reduce GPU contention.
-            // Chrome's RAF throttling is worsened by GPU pressure. Half-resolution reduces fill-rate
-            // while assets are still loading (invisible to user behind loading overlay).
-            const engine = this.scene.getEngine();
-            const loadingScaleFactor = 2; // 2x = half resolution during loading
-            engine.setHardwareScalingLevel(loadingScaleFactor);
-            engine.resize();
-            console.log(`[GPU_PRESSURE] Loading phase: hwScale=${loadingScaleFactor} (reduced)`);
-
             const result = await this.orchestrator.execute({
                 onLog: hooks?.onLog,
                 onReady: () => {
@@ -459,17 +450,16 @@ export class NavigationScene {
                 this.flightRecorder?.start();
                 this.flightRecorder?.markPhase('ENGINE_AWAKENED_START');
 
-                console.log('[ENGINE_AWAKENED] Starting consistency-based barrier (v2)...');
-                hooks?.onLog?.('[ENGINE_AWAKENED] Phase 1: RAF burst, Phase 2: dual-strategy stability...');
+                console.log('[ENGINE_AWAKENED] Starting two-phase barrier...');
+                hooks?.onLog?.('[ENGINE_AWAKENED] Phase 1: RAF burst, Phase 2: stable detection...');
 
                 const awakenedResult = await waitForEngineAwakened(this.scene, {
                     minConsecutiveFrames: 3,
-                    maxAllowedFrameGapMs: 100,
-                    maxWaitMs: 5000,
-                    burstFrameCount: 3,
-                    consistencyWindow: 5,
-                    maxCoefficientOfVariation: 0.15,
-                    maxNaturalFrames: 15,
+                    maxAllowedFrameGapMs: 100,  // Relaxed for DevTools-independent operation
+                    maxWaitMs: 3000,
+                    burstFrameCount: 5,
+                    maxBurstRetries: 2,
+                    gracefulFallbackMs: 500,    // Pass if ANY frames within 500ms (DevTools-independent)
                     debug: true,
                 });
 
@@ -478,64 +468,44 @@ export class NavigationScene {
                     console.error(
                         '[ENGINE_AWAKENED] ✗ HARD GATE FAILED. READY will NOT be declared.',
                         `naturalFrames=${awakenedResult.framesRendered}, ` +
-                        `strategy=${awakenedResult.passStrategy}, ` +
+                        `stable=${awakenedResult.stableFrameCount}, ` +
                         `firstNaturalFrameDelay=${awakenedResult.firstFrameDelayMs.toFixed(1)}ms, ` +
+                        `bursts=${awakenedResult.burstCount}, ` +
                         `timedOut=${awakenedResult.timedOut}`
                     );
-                    hooks?.onLog?.('[ENGINE_AWAKENED] ✗ HARD FAIL — zero natural frames within timeout');
+                    hooks?.onLog?.('[ENGINE_AWAKENED] ✗ HARD FAIL — natural render loop unstable');
                     throw new Error(
                         `ENGINE_AWAKENED barrier failed: ${awakenedResult.framesRendered} natural frames, ` +
-                        `strategy=${awakenedResult.passStrategy}, timedOut=${awakenedResult.timedOut}`
+                        `${awakenedResult.stableFrameCount} stable (need 3), ` +
+                        `bursts=${awakenedResult.burstCount}`
                     );
                 }
 
                 // ===== ACCEPTANCE CRITERIA VALIDATION =====
-                // Log pass strategy and throttle status
-                if (awakenedResult.throttleDetected) {
-                    console.warn(
-                        `[ENGINE_AWAKENED] ⚠️ RAF throttle detected: ` +
-                        `cadence=${awakenedResult.detectedCadenceMs.toFixed(0)}ms, ` +
-                        `strategy=${awakenedResult.passStrategy}, ` +
-                        `frames=${awakenedResult.framesRendered}`
-                    );
-                    hooks?.onLog?.(
-                        `[ENGINE_AWAKENED] ⚠️ Throttled (~${Math.round(awakenedResult.detectedCadenceMs)}ms), ` +
-                        `passed via ${awakenedResult.passStrategy}`
-                    );
-                }
                 // First natural frame delay check
                 if (awakenedResult.firstFrameDelayMs > 50) {
                     console.warn(
                         `[ENGINE_AWAKENED] ⚠️ First natural frame delay ` +
-                        `${awakenedResult.firstFrameDelayMs.toFixed(1)}ms > 50ms threshold.`
+                        `${awakenedResult.firstFrameDelayMs.toFixed(1)}ms > 50ms threshold ` +
+                        `(bursts=${awakenedResult.burstCount}).`
+                    );
+                    hooks?.onLog?.(
+                        `[ENGINE_AWAKENED] ⚠️ First natural frame delay: ${Math.round(awakenedResult.firstFrameDelayMs)}ms`
                     );
                 }
 
                 this.blackHoleLogger?.markPhase('ENGINE_AWAKENED_PASSED', {
-                    passStrategy: awakenedResult.passStrategy,
-                    throttleDetected: awakenedResult.throttleDetected,
-                    cadenceMs: awakenedResult.detectedCadenceMs,
-                    framesRendered: awakenedResult.framesRendered,
+                    stableFrames: awakenedResult.stableFrameCount,
+                    burstCount: awakenedResult.burstCount,
                     firstFrameDelay: awakenedResult.firstFrameDelayMs,
                 });
                 this.blackHoleLogger?.snapshotGPUState('POST_BARRIER');
                 this.forensicProbe?.markPhase('ENGINE_AWAKENED_PASSED', 'logical', {
-                    passStrategy: awakenedResult.passStrategy,
-                    throttleDetected: awakenedResult.throttleDetected,
-                    framesRendered: awakenedResult.framesRendered,
+                    stableFrames: awakenedResult.stableFrameCount,
                     firstFrameDelay: awakenedResult.firstFrameDelayMs,
                 });
                 this.captureProbe?.markPhase('ENGINE_AWAKENED_PASSED');
                 this.flightRecorder?.markPhase('ENGINE_AWAKENED_PASSED');
-
-                // ===== GPU PRESSURE RESTORATION =====
-                // Restore proper DPR-aware resolution now that render loop is confirmed stable.
-                // This must happen BEFORE camera transition so the grid fades in at full quality.
-                const dpr = Math.max(1, window.devicePixelRatio || 1);
-                const fullScale = 1 / dpr;
-                engine.setHardwareScalingLevel(fullScale);
-                engine.resize();
-                console.log(`[GPU_PRESSURE] Barrier passed: hwScale=${fullScale.toFixed(4)} (restored, DPR=${dpr})`);
 
                 // ===== CAMERA TRANSITION (starts grid visibility animation) =====
                 // The camera transition controls hologram visibility (0→1 over 1.1s).
