@@ -28,6 +28,7 @@
  */
 
 import * as BABYLON from '@babylonjs/core';
+import { ThrottleLockDetector } from '../../../core/loading/barrier/ThrottleLockDetector';
 
 // ============================================================
 // Constants
@@ -351,6 +352,10 @@ export class PhysicalReadyCaptureProbe {
     // Previous condition pass state (for detecting "last unlocker")
     private prevConditionPass: boolean[] = new Array(8).fill(false);
 
+    // Throttle-stable detection (shared with EngineAwakenedBarrier)
+    private throttleDetector: ThrottleLockDetector = new ThrottleLockDetector(10, 5, [95, 115]);
+    private isThrottleStable: boolean = false;
+
     constructor(scene: BABYLON.Scene, config: CaptureProbeConfig = {}) {
         this.scene = scene;
         this.engine = scene.getEngine();
@@ -390,6 +395,8 @@ export class PhysicalReadyCaptureProbe {
         this.visibilityChanges = [];
         this.focusChanges = [];
         this.prevConditionPass = new Array(8).fill(false);
+        this.throttleDetector.reset();
+        this.isThrottleStable = false;
 
         // Independent RAF state
         this.independentRafTick = 0;
@@ -458,6 +465,10 @@ export class PhysicalReadyCaptureProbe {
             this.currentIndependentDt = now - this.lastIndependentRafTime;
             this.lastIndependentRafTime = now;
             this.independentRafTick++;
+
+            // Feed throttle detector and update throttle-stable state
+            this.throttleDetector.addInterval(this.currentIndependentDt);
+            this.isThrottleStable = this.throttleDetector.isThrottleStable();
 
             this.independentRafId = requestAnimationFrame(tick);
         };
@@ -745,8 +756,8 @@ export class PhysicalReadyCaptureProbe {
             frame.engineRenderWidth === frame.canvasBufferWidth &&
             frame.engineRenderHeight === frame.canvasBufferHeight,
 
-            // C3: RAF cadence stable (not throttled)
-            frame.independentRafDt > 0 && frame.independentRafDt <= MAX_STABLE_RAF_DT_MS,
+            // C3: RAF cadence stable OR throttle-stable (browser throttling accepted)
+            (frame.independentRafDt > 0 && frame.independentRafDt <= MAX_STABLE_RAF_DT_MS) || this.isThrottleStable,
 
             // C4: At least one resize event has occurred
             this.totalResizeCount > 0,
