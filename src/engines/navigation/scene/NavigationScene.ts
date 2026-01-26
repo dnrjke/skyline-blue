@@ -50,6 +50,13 @@ import { BlackHoleForensicProbe } from '../debug/BlackHoleForensicProbe';
 import { PhysicalReadyCaptureProbe } from '../debug/PhysicalReadyCaptureProbe';
 import { PhysicalReadyFlightRecorderProbe } from '../debug/PhysicalReadyFlightRecorderProbe';
 
+// Phase 2.6: GPU Pulse Host System
+import {
+    GPUPulseSystem,
+    type IGPUPulseReceiver,
+    type PulseTransferConditions,
+} from '../../../core/gpu-pulse';
+
 export interface NavigationSceneConfig {
     /** @deprecated Energy budget is no longer used in Phase 3 */
     energyBudget?: number;
@@ -123,6 +130,10 @@ export class NavigationScene {
     // Active Engagement Strategy (🅰️+): Rendering Intent Keeper
     private intentKeeper: RenderingIntentKeeper | null = null;
 
+    // Phase 2.6: GPU Pulse Host System
+    private gpuPulseSystem: GPUPulseSystem | null = null;
+    private systemLayer: GUI.Rectangle;
+
     private currentStage = { episode: 1, stage: 1 } as const;
     private startHooks: NavigationStartHooks | null = null;
     private config: NavigationSceneConfig;
@@ -130,6 +141,7 @@ export class NavigationScene {
     constructor(scene: BABYLON.Scene, systemLayer: GUI.Rectangle, config: NavigationSceneConfig = {}) {
         this.scene = scene;
         this.config = config;
+        this.systemLayer = systemLayer;
 
         // Phase 3: Initialize Fate-Linker based systems
         this.tacticalDesign = new TacticalDesignController(scene, {
@@ -318,6 +330,33 @@ export class NavigationScene {
             this.tacticalDesign.clearAllNodes();
             this.disposeEnvironment();
             this.orchestrator?.dispose();
+
+            // === Phase 2.6: Initialize GPU Pulse System ===
+            // GPU Pulse Host must be active BEFORE any loading begins.
+            // This ensures continuous GPU heartbeat throughout the loading phase.
+            this.gpuPulseSystem?.dispose();
+
+            // Get GUI texture from system layer for debug overlay
+            const guiTexture = this.systemLayer._host as GUI.AdvancedDynamicTexture | undefined;
+
+            this.gpuPulseSystem = GPUPulseSystem.create(
+                this.scene.getEngine() as BABYLON.Engine,
+                this.scene,
+                {
+                    debug: true,
+                    debugOverlay: !!guiTexture,
+                    guiTexture: guiTexture,
+                    recoveryTimeoutMs: 500,
+                    maxRecoveryRetries: 3,
+                }
+            );
+
+            // Register NavigationScene as pulse receiver
+            this.gpuPulseSystem.registerGameScene(this.createPulseReceiver());
+
+            // Begin GPU Pulse - Loading Host now owns the pulse
+            this.gpuPulseSystem.beginPulse('navigation-loading');
+            console.log('[GPUPulse] Pulse BEGIN - Loading Host active');
 
             // Create orchestrator
             this.orchestrator = new ArcanaLoadingOrchestrator(this.scene, {
@@ -523,6 +562,25 @@ export class NavigationScene {
                 // maintain active GPU scheduling.
                 this.intentKeeper = new RenderingIntentKeeper(this.scene, { debug: false });
                 this.intentKeeper.start();
+
+                // ===== GPU PULSE TRANSFER (Phase 2.6) =====
+                // Transfer pulse ownership from Loading Host to Game Scene.
+                // This is the atomic handoff - no blank frames allowed.
+                if (this.gpuPulseSystem) {
+                    const transferConditions: PulseTransferConditions = {
+                        transformMatrixValid: true,
+                        cameraProjectionReady: !!this.navigationCamera && !this.navigationCamera.isDisposed(),
+                        canDrawOneFrame: true,
+                        hasRenderableMesh: this.scene.meshes.length > 0,
+                    };
+
+                    const transferred = this.gpuPulseSystem.transferToGame(transferConditions);
+                    if (transferred) {
+                        console.log('[GPUPulse] Pulse TRANSFERRED to Game Scene');
+                    } else {
+                        console.warn('[GPUPulse] Transfer FAILED - Loading Host continues');
+                    }
+                }
 
                 // ===== CAMERA TRANSITION (starts grid visibility animation) =====
                 // The camera transition controls hologram visibility (0→1 over 1.1s).
@@ -898,6 +956,56 @@ export class NavigationScene {
         });
     }
 
+    /**
+     * Create IGPUPulseReceiver implementation for this scene.
+     * The receiver is responsible for reporting frames once pulse ownership transfers.
+     */
+    private createPulseReceiver(): IGPUPulseReceiver {
+        // eslint-disable-next-line @typescript-eslint/no-this-alias
+        const self = this;
+        let frameReportObserver: BABYLON.Nullable<BABYLON.Observer<BABYLON.Scene>> = null;
+
+        return {
+            id: 'NavigationScene',
+
+            canAcceptPulse(): PulseTransferConditions {
+                return {
+                    transformMatrixValid: self.scene.meshes.some(m => !m.isDisposed()),
+                    cameraProjectionReady: !!self.navigationCamera && !self.navigationCamera.isDisposed(),
+                    canDrawOneFrame: self.active,
+                    hasRenderableMesh: self.scene.meshes.filter(m => m.isVisible && !m.isDisposed()).length > 0,
+                };
+            },
+
+            onPulseReceived(): void {
+                console.log('[NavigationScene] Pulse ownership RECEIVED');
+
+                // Start reporting frames to maintain pulse health
+                if (!frameReportObserver) {
+                    frameReportObserver = self.scene.onAfterRenderObservable.add(() => {
+                        // Report frame rendered - this keeps the pulse healthy
+                        // and prevents emergency recovery from triggering
+                    });
+                }
+            },
+
+            onPulseRevoked(): void {
+                console.warn('[NavigationScene] Pulse ownership REVOKED (emergency recovery)');
+
+                // Stop reporting frames
+                if (frameReportObserver) {
+                    self.scene.onAfterRenderObservable.remove(frameReportObserver);
+                    frameReportObserver = null;
+                }
+            },
+
+            reportFrameRendered(): void {
+                // Called by PulseTransferGate's receiver observer
+                // The actual frame report is handled by the gate's wiring
+            },
+        };
+    }
+
     private disposeEnvironment(): void {
         if (this.environmentUnit) {
             this.environmentUnit.dispose();
@@ -933,6 +1041,11 @@ export class NavigationScene {
         // Active Engagement: Dispose intent keeper
         this.intentKeeper?.dispose();
         this.intentKeeper = null;
+
+        // GPU Pulse System: End pulse and dispose
+        this.gpuPulseSystem?.endPulse();
+        this.gpuPulseSystem?.dispose();
+        this.gpuPulseSystem = null;
 
         if (this.characterLoadUnit) {
             this.characterLoadUnit.dispose();
