@@ -70,6 +70,18 @@ const ANOMALY_CHECK_INTERVAL = 30;
 /** Resize starvation threshold: if mismatch persists this long without resize, critical */
 const RESIZE_STARVATION_THRESHOLD_MS = 5000;
 
+/** WebGL snapshot interval: 1 second in normal mode */
+const WEBGL_SNAPSHOT_INTERVAL_MS = 1000;
+
+/** WebGL snapshot interval: 10 frames in throttled mode */
+const WEBGL_SNAPSHOT_THROTTLE_FRAMES = 10;
+
+/** Render stall threshold: if onAfterRender not called for this long, consider stalled */
+const RENDER_STALL_THRESHOLD_MS = 2000;
+
+/** Camera viewMatrix change threshold for detecting camera freeze */
+const VIEW_MATRIX_EPSILON = 0.0001;
+
 // ============================================================
 // Types
 // ============================================================
@@ -157,6 +169,81 @@ export interface ForensicFrameRecord {
 
     // Page state
     visibilityState: DocumentVisibilityState;
+
+    // Pipeline snapshot (added for GPU/render freeze diagnosis)
+    /** engine.getFps() at this frame */
+    engineFps: number;
+    /** Whether camera viewMatrix changed from previous frame */
+    viewMatrixChanged: boolean;
+}
+
+/**
+ * WebGL Context Snapshot — GPU state at a point in time.
+ * Captured every 1 second (or 10 frames in throttled mode).
+ */
+export interface WebGLSnapshot {
+    /** Absolute timestamp */
+    absTime: number;
+    /** Time relative to probe start (ms) */
+    relTime: number;
+    /** Frame index when snapshot taken */
+    frameIndex: number;
+    /** gl.getError() result (0 = NO_ERROR) */
+    glError: number;
+    /** Human-readable error name */
+    glErrorName: string;
+    /** engine.getFps() */
+    fps: number;
+    /** Trigger reason for this snapshot */
+    trigger: 'interval' | 'stall' | 'context_event' | 'manual';
+    /** Currently active LoadUnit (if available) */
+    activeLoadUnit: string | null;
+}
+
+/**
+ * Render Stall Event — When scene.onAfterRender stops being called.
+ */
+export interface RenderStallEvent {
+    /** When stall was detected */
+    detectedAt: number;
+    /** Last onAfterRender timestamp */
+    lastAfterRenderAt: number;
+    /** Gap duration (ms) */
+    gapMs: number;
+    /** Frame index at detection */
+    frameIndex: number;
+    /** gl.getError() captured immediately ("last scream") */
+    glErrorAtStall: number;
+    /** gl.getError() name */
+    glErrorName: string;
+    /** Active LoadUnit at stall */
+    activeLoadUnit: string | null;
+    /** engine.getFps() at stall */
+    fps: number;
+    /** Whether stall was resolved */
+    resolved: boolean;
+    /** Resolution timestamp (if resolved) */
+    resolvedAt: number | null;
+}
+
+/**
+ * TacticalGrid Render Event — First actual render of TacticalGrid mesh.
+ */
+export interface TacticalGridRenderEvent {
+    /** First render timestamp */
+    firstRenderAt: number;
+    /** Time relative to probe start */
+    relTime: number;
+    /** Frame index at first render */
+    frameIndex: number;
+    /** Time since PHYSICAL_READY (if achieved) */
+    timeSincePhysicalReady: number | null;
+    /** Mesh visibility state */
+    meshIsVisible: boolean;
+    /** Mesh isEnabled state */
+    meshIsEnabled: boolean;
+    /** Material ready state */
+    materialReady: boolean;
 }
 
 export interface ForensicResizeEvent {
@@ -310,6 +397,14 @@ export interface ForensicReport {
     whyThisDuration: string[];
     /** Diagnosis narrative */
     diagnosis: string[];
+
+    // GPU/Render Pipeline Monitoring fields
+    /** WebGL context snapshots timeline */
+    webglSnapshots: WebGLSnapshot[];
+    /** Detected render stall events */
+    renderStalls: RenderStallEvent[];
+    /** TacticalGrid first render event (if captured) */
+    tacticalGridRenderEvent: TacticalGridRenderEvent | null;
 }
 
 export interface ForensicProbeConfig {
@@ -402,6 +497,33 @@ export class BlackHoleForensicProbe {
     // Auto-stop timer
     private autoStopTimer: ReturnType<typeof setTimeout> | null = null;
 
+    // ===== NEW: GPU/Render Pipeline Monitoring =====
+
+    // WebGL context
+    private gl: WebGLRenderingContext | WebGL2RenderingContext | null = null;
+    private webglSnapshots: WebGLSnapshot[] = [];
+    private lastWebglSnapshotTime: number = 0;
+    private lastWebglSnapshotFrame: number = 0;
+    private contextLostHandler: ((e: Event) => void) | null = null;
+    private contextRestoredHandler: ((e: Event) => void) | null = null;
+
+    // Render stall detection
+    private renderStalls: RenderStallEvent[] = [];
+    private lastAfterRenderTime: number = 0;
+    private currentStall: RenderStallEvent | null = null;
+    private stallCheckIntervalId: ReturnType<typeof setInterval> | null = null;
+
+    // TacticalGrid tracking
+    private tacticalGridRenderEvent: TacticalGridRenderEvent | null = null;
+    private tacticalGridMesh: BABYLON.Mesh | null = null;
+    private tacticalGridObserver: BABYLON.Nullable<BABYLON.Observer<BABYLON.Mesh>> = null;
+
+    // Camera viewMatrix tracking
+    private lastViewMatrix: BABYLON.Matrix | null = null;
+
+    // LoadUnit reference (for context)
+    private loadingOrchestratorRef: { getCurrentLoadUnit?: () => string | null } | null = null;
+
     constructor(scene: BABYLON.Scene, config: ForensicProbeConfig = {}) {
         this.scene = scene;
         this.engine = scene.getEngine();
@@ -451,6 +573,17 @@ export class BlackHoleForensicProbe {
         this.totalStarvationMs = 0;
         this.starvationHistory = [];
 
+        // GPU/Render Pipeline state
+        this.webglSnapshots = [];
+        this.lastWebglSnapshotTime = this.startTime;
+        this.lastWebglSnapshotFrame = 0;
+        this.renderStalls = [];
+        this.lastAfterRenderTime = this.startTime;
+        this.currentStall = null;
+        this.tacticalGridRenderEvent = null;
+        this.tacticalGridMesh = null;
+        this.lastViewMatrix = null;
+
         // Setup all instrumentation
         this.setupBabylonObservers();
         this.setupIndependentRaf();
@@ -459,6 +592,11 @@ export class BlackHoleForensicProbe {
         this.setupOrientationChange();
         this.setupVisibilityMonitor();
         this.interceptEngineResize();
+
+        // NEW: GPU/Render Pipeline monitoring
+        this.setupWebGLMonitoring();
+        this.setupRenderStallDetection();
+        this.setupTacticalGridTracking();
 
         // Auto-stop
         this.autoStopTimer = setTimeout(() => {
@@ -512,6 +650,11 @@ export class BlackHoleForensicProbe {
         this.teardownOrientationChange();
         this.teardownVisibilityMonitor();
         this.restoreEngineResize();
+
+        // NEW: Teardown GPU/Render Pipeline monitoring
+        this.teardownWebGLMonitoring();
+        this.teardownRenderStallDetection();
+        this.teardownTacticalGridTracking();
 
         if (this.autoStopTimer) {
             clearTimeout(this.autoStopTimer);
@@ -583,6 +726,10 @@ export class BlackHoleForensicProbe {
         this.afterRenderObs = this.scene.onAfterRenderObservable.add(() => {
             if (!this.active) return;
             this.currentAfterRender = performance.now();
+
+            // Notify render stall detector that onAfterRender was called
+            this.onAfterRenderCalled();
+
             this.commitFrameRecord();
         });
     }
@@ -643,6 +790,14 @@ export class BlackHoleForensicProbe {
             // Sample every 10 ticks for the report (saves memory for long runs)
             if (this.independentRafTick % 10 === 0) {
                 this.independentRafSamples.push(record);
+            }
+
+            // WebGL periodic snapshot (uses independentRafTick as frame counter in throttled mode)
+            this.maybePeriodicWebGLSnapshot();
+
+            // Periodic TacticalGrid search if not found yet
+            if (!this.tacticalGridMesh && this.independentRafTick % 60 === 0) {
+                this.findAndTrackTacticalGrid();
             }
 
             this.independentRafId = requestAnimationFrame(tick);
@@ -784,6 +939,10 @@ export class BlackHoleForensicProbe {
             Math.abs(canvasBufferHeight - expectedBufferH) <= 2
         );
 
+        // GPU/Render Pipeline Monitoring fields
+        const engineFps = this.engine.getFps();
+        const viewMatrixChanged = this.checkViewMatrixChange();
+
         return {
             index: this.frameIndex,
             absTime: now,
@@ -807,6 +966,8 @@ export class BlackHoleForensicProbe {
             sizeConverged,
             dprConverged,
             visibilityState: document.visibilityState,
+            engineFps,
+            viewMatrixChanged,
         };
     }
 
@@ -1357,6 +1518,372 @@ export class BlackHoleForensicProbe {
     }
 
     // ============================================================
+    // NEW: WebGL Context Monitoring
+    // ============================================================
+
+    private setupWebGLMonitoring(): void {
+        // Get WebGL context
+        if (this.canvas) {
+            this.gl = this.canvas.getContext('webgl2') || this.canvas.getContext('webgl');
+        }
+
+        if (!this.gl) {
+            this.log('WARNING: Could not obtain WebGL context for monitoring');
+            return;
+        }
+
+        // Setup context lost/restored handlers
+        this.contextLostHandler = (e: Event) => {
+            e.preventDefault();
+            this.log('CRITICAL: WebGL context LOST');
+            this.captureWebGLSnapshot('context_event', 'CONTEXT_LOST');
+            this.openAnomaly('RENDER_LOOP_STALL', 'critical',
+                'WebGL context lost - GPU may be overloaded or reset');
+        };
+
+        this.contextRestoredHandler = () => {
+            this.log('WebGL context RESTORED');
+            this.captureWebGLSnapshot('context_event', 'CONTEXT_RESTORED');
+            this.closeAnomaly('RENDER_LOOP_STALL');
+        };
+
+        this.canvas?.addEventListener('webglcontextlost', this.contextLostHandler);
+        this.canvas?.addEventListener('webglcontextrestored', this.contextRestoredHandler);
+
+        // Capture initial snapshot
+        this.captureWebGLSnapshot('manual', 'INITIAL');
+    }
+
+    private teardownWebGLMonitoring(): void {
+        if (this.canvas && this.contextLostHandler) {
+            this.canvas.removeEventListener('webglcontextlost', this.contextLostHandler);
+            this.contextLostHandler = null;
+        }
+        if (this.canvas && this.contextRestoredHandler) {
+            this.canvas.removeEventListener('webglcontextrestored', this.contextRestoredHandler);
+            this.contextRestoredHandler = null;
+        }
+        this.gl = null;
+    }
+
+    /**
+     * Capture WebGL state snapshot.
+     * Called:
+     * - Every 1 second (or 10 frames in throttled mode)
+     * - On context lost/restored
+     * - On render stall detection (immediate "last scream")
+     */
+    private captureWebGLSnapshot(trigger: WebGLSnapshot['trigger'], extra?: string): void {
+        const now = performance.now();
+        let glError = 0;
+        let glErrorName = 'NO_ERROR';
+
+        if (this.gl) {
+            glError = this.gl.getError();
+            glErrorName = this.glErrorToString(glError);
+        }
+
+        const snapshot: WebGLSnapshot = {
+            absTime: now,
+            relTime: now - this.startTime,
+            frameIndex: this.frameIndex,
+            glError,
+            glErrorName,
+            fps: this.engine.getFps(),
+            trigger,
+            activeLoadUnit: this.getActiveLoadUnit(),
+        };
+
+        this.webglSnapshots.push(snapshot);
+
+        // Log if error detected
+        if (glError !== 0) {
+            this.log(
+                `WEBGL_ERROR: ${glErrorName} (${glError}) at frame=${this.frameIndex} ` +
+                `fps=${snapshot.fps.toFixed(1)} trigger=${trigger} ${extra || ''} ` +
+                `loadUnit=${snapshot.activeLoadUnit || 'none'}`
+            );
+        } else if (trigger === 'stall' || trigger === 'context_event') {
+            this.log(
+                `WEBGL_SNAPSHOT: ${trigger} ${extra || ''} at frame=${this.frameIndex} ` +
+                `fps=${snapshot.fps.toFixed(1)} glError=${glErrorName} ` +
+                `loadUnit=${snapshot.activeLoadUnit || 'none'}`
+            );
+        }
+
+        this.lastWebglSnapshotTime = now;
+        this.lastWebglSnapshotFrame = this.frameIndex;
+    }
+
+    private glErrorToString(error: number): string {
+        if (!this.gl) return 'NO_CONTEXT';
+        const GL = this.gl;
+        switch (error) {
+            case GL.NO_ERROR: return 'NO_ERROR';
+            case GL.INVALID_ENUM: return 'INVALID_ENUM';
+            case GL.INVALID_VALUE: return 'INVALID_VALUE';
+            case GL.INVALID_OPERATION: return 'INVALID_OPERATION';
+            case GL.INVALID_FRAMEBUFFER_OPERATION: return 'INVALID_FRAMEBUFFER_OPERATION';
+            case GL.OUT_OF_MEMORY: return 'OUT_OF_MEMORY';
+            case GL.CONTEXT_LOST_WEBGL: return 'CONTEXT_LOST_WEBGL';
+            default: return `UNKNOWN_${error}`;
+        }
+    }
+
+    /**
+     * Check if it's time for a periodic WebGL snapshot.
+     * Called from the independent RAF tick.
+     */
+    private maybePeriodicWebGLSnapshot(): void {
+        const now = performance.now();
+        const timeSinceLastSnapshot = now - this.lastWebglSnapshotTime;
+        const framesSinceLastSnapshot = this.frameIndex - this.lastWebglSnapshotFrame;
+
+        // Time-based: every WEBGL_SNAPSHOT_INTERVAL_MS
+        const timeTriggered = timeSinceLastSnapshot >= WEBGL_SNAPSHOT_INTERVAL_MS;
+
+        // Frame-based (for throttled mode): every WEBGL_SNAPSHOT_THROTTLE_FRAMES frames
+        const frameTriggered = framesSinceLastSnapshot >= WEBGL_SNAPSHOT_THROTTLE_FRAMES;
+
+        if (timeTriggered || frameTriggered) {
+            this.captureWebGLSnapshot('interval');
+        }
+    }
+
+    // ============================================================
+    // NEW: Render Stall Detection
+    // ============================================================
+
+    private setupRenderStallDetection(): void {
+        this.lastAfterRenderTime = performance.now();
+
+        // Check for stalls every 500ms
+        this.stallCheckIntervalId = setInterval(() => {
+            if (!this.active) return;
+            this.checkRenderStall();
+        }, 500);
+    }
+
+    private teardownRenderStallDetection(): void {
+        if (this.stallCheckIntervalId) {
+            clearInterval(this.stallCheckIntervalId);
+            this.stallCheckIntervalId = null;
+        }
+
+        // Close any active stall
+        if (this.currentStall && !this.currentStall.resolved) {
+            this.currentStall.resolved = true;
+            this.currentStall.resolvedAt = performance.now();
+        }
+    }
+
+    /**
+     * Called from scene.onAfterRenderObservable to update last render time.
+     */
+    private onAfterRenderCalled(): void {
+        const now = performance.now();
+
+        // If we were in a stall, it's now resolved
+        if (this.currentStall && !this.currentStall.resolved) {
+            this.currentStall.resolved = true;
+            this.currentStall.resolvedAt = now;
+            const stallDuration = now - this.currentStall.detectedAt;
+            this.log(
+                `RENDER_STALL_RESOLVED: duration=${stallDuration.toFixed(0)}ms ` +
+                `frame=${this.frameIndex}`
+            );
+        }
+
+        this.lastAfterRenderTime = now;
+    }
+
+    /**
+     * Check if render loop has stalled.
+     * Called periodically from setInterval.
+     */
+    private checkRenderStall(): void {
+        const now = performance.now();
+        const gapMs = now - this.lastAfterRenderTime;
+
+        if (gapMs >= RENDER_STALL_THRESHOLD_MS && !this.currentStall) {
+            // NEW STALL DETECTED - capture "last scream"
+            this.captureWebGLSnapshot('stall', 'RENDER_STALL_DETECTED');
+
+            const stall: RenderStallEvent = {
+                detectedAt: now,
+                lastAfterRenderAt: this.lastAfterRenderTime,
+                gapMs,
+                frameIndex: this.frameIndex,
+                glErrorAtStall: this.gl?.getError() ?? 0,
+                glErrorName: this.glErrorToString(this.gl?.getError() ?? 0),
+                activeLoadUnit: this.getActiveLoadUnit(),
+                fps: this.engine.getFps(),
+                resolved: false,
+                resolvedAt: null,
+            };
+
+            this.currentStall = stall;
+            this.renderStalls.push(stall);
+
+            // Log with camera viewMatrix info
+            const camera = this.scene.activeCamera;
+            const viewMatrixInfo = camera ?
+                `viewMatrix=[${camera.getViewMatrix().m.slice(0, 4).map(v => v.toFixed(2)).join(',')}...]` :
+                'no camera';
+
+            this.log(
+                `RENDER_STALL_DETECTED: gap=${gapMs.toFixed(0)}ms frame=${this.frameIndex} ` +
+                `fps=${stall.fps.toFixed(1)} glError=${stall.glErrorName} ` +
+                `loadUnit=${stall.activeLoadUnit || 'none'} ${viewMatrixInfo}`
+            );
+        } else if (gapMs >= RENDER_STALL_THRESHOLD_MS && this.currentStall && !this.currentStall.resolved) {
+            // Ongoing stall - update gap
+            this.currentStall.gapMs = gapMs;
+
+            // Periodic snapshot during stall (every 5 seconds)
+            if (gapMs % 5000 < 500) {
+                this.captureWebGLSnapshot('stall', `ONGOING_STALL_${Math.floor(gapMs / 1000)}s`);
+            }
+        }
+    }
+
+    // ============================================================
+    // NEW: TacticalGrid Tracking
+    // ============================================================
+
+    private setupTacticalGridTracking(): void {
+        // Try to find TacticalGrid mesh (may not exist yet)
+        this.findAndTrackTacticalGrid();
+
+        // Also check on each frame in case it appears later
+    }
+
+    private teardownTacticalGridTracking(): void {
+        if (this.tacticalGridObserver && this.tacticalGridMesh) {
+            this.tacticalGridMesh.onAfterRenderObservable.remove(this.tacticalGridObserver);
+            this.tacticalGridObserver = null;
+        }
+        this.tacticalGridMesh = null;
+    }
+
+    /**
+     * Find TacticalGrid mesh and attach onAfterRenderObservable.
+     * Called at start and periodically until found.
+     */
+    private findAndTrackTacticalGrid(): void {
+        if (this.tacticalGridMesh) return; // Already tracking
+
+        // Search for mesh by name pattern (must be actual Mesh, not just AbstractMesh)
+        const mesh = this.scene.meshes.find(m =>
+            (m.name.toLowerCase().includes('tacticalgrid') ||
+             m.name.toLowerCase().includes('tactical_grid') ||
+             m.name.toLowerCase().includes('grid')) &&
+            m instanceof BABYLON.Mesh
+        ) as BABYLON.Mesh | undefined;
+
+        if (mesh) {
+            this.tacticalGridMesh = mesh;
+            this.log(`TACTICAL_GRID_FOUND: name="${mesh.name}" isVisible=${mesh.isVisible} isEnabled=${mesh.isEnabled()}`);
+
+            // Attach onAfterRenderObservable (only available on Mesh, not AbstractMesh)
+            this.tacticalGridObserver = mesh.onAfterRenderObservable.add(() => {
+                if (!this.tacticalGridRenderEvent) {
+                    this.onTacticalGridFirstRender(mesh);
+                }
+            });
+        }
+    }
+
+    /**
+     * Called on first actual render of TacticalGrid mesh.
+     */
+    private onTacticalGridFirstRender(mesh: BABYLON.Mesh): void {
+        const now = performance.now();
+        const relTime = now - this.startTime;
+
+        let materialReady = false;
+        if (mesh.material) {
+            materialReady = mesh.material.isReady(mesh, true);
+        }
+
+        // Calculate time since PHYSICAL_READY (use confirmedAt which is relative time)
+        const timeSincePhysicalReady = this.physicalReady ?
+            (relTime - this.physicalReady.confirmedAt) : null;
+
+        this.tacticalGridRenderEvent = {
+            firstRenderAt: now,
+            relTime,
+            frameIndex: this.frameIndex,
+            timeSincePhysicalReady,
+            meshIsVisible: mesh.isVisible,
+            meshIsEnabled: mesh.isEnabled(),
+            materialReady,
+        };
+
+        this.log(
+            `★ TACTICAL_GRID_FIRST_RENDER at frame=${this.frameIndex} ` +
+            `t=${((now - this.startTime) / 1000).toFixed(2)}s ` +
+            `sincePhysicalReady=${this.tacticalGridRenderEvent.timeSincePhysicalReady?.toFixed(0) ?? 'N/A'}ms ` +
+            `isVisible=${mesh.isVisible} isEnabled=${mesh.isEnabled()} materialReady=${materialReady}`
+        );
+
+        // Capture WebGL snapshot at this moment
+        this.captureWebGLSnapshot('manual', 'TACTICAL_GRID_FIRST_RENDER');
+    }
+
+    /**
+     * Check if camera viewMatrix has changed since last frame.
+     * Helps diagnose if camera is frozen.
+     */
+    private checkViewMatrixChange(): boolean {
+        const camera = this.scene.activeCamera;
+        if (!camera) return false;
+
+        const currentMatrix = camera.getViewMatrix();
+
+        if (!this.lastViewMatrix) {
+            this.lastViewMatrix = currentMatrix.clone();
+            return true; // First frame, consider changed
+        }
+
+        // Compare matrices
+        let changed = false;
+        for (let i = 0; i < 16; i++) {
+            if (Math.abs(currentMatrix.m[i] - this.lastViewMatrix.m[i]) > VIEW_MATRIX_EPSILON) {
+                changed = true;
+                break;
+            }
+        }
+
+        // Update stored matrix
+        this.lastViewMatrix.copyFrom(currentMatrix);
+
+        return changed;
+    }
+
+    // ============================================================
+    // NEW: LoadUnit Context
+    // ============================================================
+
+    /**
+     * Set reference to LoadingOrchestrator for LoadUnit context.
+     * Call this after creating the probe.
+     */
+    setLoadingOrchestratorRef(ref: { getCurrentLoadUnit?: () => string | null }): void {
+        this.loadingOrchestratorRef = ref;
+    }
+
+    /**
+     * Get currently active LoadUnit name (if available).
+     */
+    private getActiveLoadUnit(): string | null {
+        if (this.loadingOrchestratorRef?.getCurrentLoadUnit) {
+            return this.loadingOrchestratorRef.getCurrentLoadUnit();
+        }
+        return null;
+    }
+
+    // ============================================================
     // Report Generation
     // ============================================================
 
@@ -1380,6 +1907,10 @@ export class BlackHoleForensicProbe {
             starvationHistory: [...this.starvationHistory],
             whyThisDuration,
             diagnosis,
+            // GPU/Render Pipeline Monitoring
+            webglSnapshots: [...this.webglSnapshots],
+            renderStalls: [...this.renderStalls],
+            tacticalGridRenderEvent: this.tacticalGridRenderEvent,
         };
     }
 
@@ -1902,6 +2433,47 @@ export class BlackHoleForensicProbe {
         }
         console.groupEnd();
 
+        // GPU/Render Pipeline Monitoring
+        console.group('GPU/Render Pipeline Monitoring');
+
+        // WebGL Snapshots summary
+        if (report.webglSnapshots.length > 0) {
+            const errors = report.webglSnapshots.filter(s => s.glError !== 0);
+            console.log(`WebGL Snapshots: ${report.webglSnapshots.length} captured, ${errors.length} with errors`);
+            if (errors.length > 0) {
+                console.warn('WebGL Errors detected:');
+                for (const err of errors.slice(0, 10)) {
+                    console.warn(`  t=${err.relTime.toFixed(0)}ms frame=${err.frameIndex} error=${err.glErrorName} fps=${err.fps.toFixed(1)} loadUnit=${err.activeLoadUnit || 'none'}`);
+                }
+                if (errors.length > 10) console.warn(`  ... and ${errors.length - 10} more errors`);
+            }
+        } else {
+            console.log('WebGL Snapshots: none captured');
+        }
+
+        // Render Stalls summary
+        if (report.renderStalls.length > 0) {
+            console.warn(`Render Stalls: ${report.renderStalls.length} detected`);
+            for (const stall of report.renderStalls.slice(0, 5)) {
+                const status = stall.resolved ? `resolved at ${stall.resolvedAt?.toFixed(0)}ms` : 'UNRESOLVED';
+                console.warn(`  gap=${stall.gapMs.toFixed(0)}ms frame=${stall.frameIndex} fps=${stall.fps.toFixed(1)} glError=${stall.glErrorName} loadUnit=${stall.activeLoadUnit || 'none'} [${status}]`);
+            }
+            if (report.renderStalls.length > 5) console.warn(`  ... and ${report.renderStalls.length - 5} more stalls`);
+        } else {
+            console.log('Render Stalls: none detected');
+        }
+
+        // TacticalGrid render event
+        if (report.tacticalGridRenderEvent) {
+            const tg = report.tacticalGridRenderEvent;
+            console.log(`TacticalGrid First Render: t=${tg.relTime.toFixed(0)}ms frame=${tg.frameIndex} sincePhysicalReady=${tg.timeSincePhysicalReady?.toFixed(0) ?? 'N/A'}ms`);
+            console.log(`  visible=${tg.meshIsVisible} enabled=${tg.meshIsEnabled} materialReady=${tg.materialReady}`);
+        } else {
+            console.warn('TacticalGrid First Render: NOT CAPTURED (mesh not found or never rendered)');
+        }
+
+        console.groupEnd();
+
         console.group('Diagnosis');
         for (const line of report.diagnosis) {
             if (line.includes('***')) console.error(line);
@@ -1930,6 +2502,7 @@ export class BlackHoleForensicProbe {
             'sceneRenderDuration', 'interFrameGap',
             'canvasBufW', 'canvasBufH', 'engineW', 'engineH',
             'hwScale', 'dpr', 'sizeConverged', 'dprConverged', 'visibility',
+            'engineFps', 'viewMatrixChanged',
         ];
         const rows = this.frames.map(f => [
             f.index, f.relTime.toFixed(1), f.independentRafDt.toFixed(1),
@@ -1940,6 +2513,7 @@ export class BlackHoleForensicProbe {
             f.hardwareScalingLevel, f.devicePixelRatio,
             f.sizeConverged ? 1 : 0, f.dprConverged ? 1 : 0,
             f.visibilityState,
+            f.engineFps.toFixed(1), f.viewMatrixChanged ? 1 : 0,
         ].join(','));
 
         return [headers.join(','), ...rows].join('\n');
