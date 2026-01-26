@@ -37,6 +37,7 @@
  */
 
 import * as BABYLON from '@babylonjs/core';
+import { ThrottleLockDetector } from '../../../core/loading/barrier/ThrottleLockDetector';
 
 // ============================================================
 // Constants
@@ -390,6 +391,10 @@ export class BlackHoleForensicProbe {
     private physicalReadyCandidate: boolean = false; // Currently meeting conditions
     private resizeOccurred: boolean = false;
 
+    // Throttle-stable detection (shared with EngineAwakenedBarrier)
+    private throttleDetector: ThrottleLockDetector = new ThrottleLockDetector(10, 5, [95, 115]);
+    private isThrottleStable: boolean = false;
+
     // Convergence timeline
     private convergenceTimeline: ForensicReport['convergenceTimeline'] = [];
 
@@ -433,6 +438,8 @@ export class BlackHoleForensicProbe {
         this.physicalReadyCandidate = false;
         this.resizeOccurred = false;
         this.convergenceTimeline = [];
+        this.throttleDetector.reset();
+        this.isThrottleStable = false;
         this.prevEndFrame = this.startTime;
         this.engineResizeCallCount = 0;
 
@@ -626,6 +633,10 @@ export class BlackHoleForensicProbe {
             this.currentIndependentDt = now - this.lastIndependentRafTime;
             this.lastIndependentRafTime = now;
             this.independentRafTick++;
+
+            // Feed throttle detector and update throttle-stable state
+            this.throttleDetector.addInterval(this.currentIndependentDt);
+            this.isThrottleStable = this.throttleDetector.isThrottleStable();
 
             // Record every tick (full timeline for forensic reconstruction)
             const record: IndependentRafRecord = {
@@ -911,15 +922,21 @@ export class BlackHoleForensicProbe {
         // Condition 2: Engine/canvas size converged
         if (!frame.sizeConverged) return false;
 
-        // Condition 3: RAF cadence stable (not throttled)
-        if (frame.independentRafDt > PHYSICAL_READY_MAX_RAF_DT_MS) return false;
+        // Condition 3: RAF cadence stable OR throttle-stable (browser throttling accepted)
+        const rafCadenceOk = frame.independentRafDt > 0 && frame.independentRafDt <= PHYSICAL_READY_MAX_RAF_DT_MS;
+        if (!rafCadenceOk && !this.isThrottleStable) return false;
 
         // Condition 4: At least one resize event has occurred
         if (!this.resizeOccurred) return false;
 
-        // Condition 5: No active critical anomalies
+        // Condition 5: No active critical anomalies (RAF_FREQUENCY_LOCK ignored when throttle-stable)
         const hasCritical = Array.from(this.activeAnomalies.values())
-            .some(a => a.severity === 'critical' && a.active);
+            .some(a => {
+                if (!a.active || a.severity !== 'critical') return false;
+                // When throttle-stable, RAF_FREQUENCY_LOCK is expected behavior
+                if (this.isThrottleStable && a.type === 'RAF_FREQUENCY_LOCK') return false;
+                return true;
+            });
         if (hasCritical) return false;
 
         // Condition 6: Resize starvation resolved
