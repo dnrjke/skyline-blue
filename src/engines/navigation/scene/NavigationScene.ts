@@ -26,9 +26,11 @@ import {
     LoadingPhase,
     ArcanaLoadingOrchestrator,
     MaterialWarmupUnit,
+    SceneMaterialWarmupUnit,
     RenderReadyBarrierUnit,
     BarrierRequirement,
     waitForEngineAwakened,
+    RenderingIntentKeeper,
     type LoadUnit,
 } from '../../../core/loading';
 import {
@@ -117,6 +119,9 @@ export class NavigationScene {
 
     // Debug: Flight Recorder (JSON event timeline for frame-level analysis)
     private flightRecorder: PhysicalReadyFlightRecorderProbe | null = null;
+
+    // Active Engagement Strategy (🅰️+): Rendering Intent Keeper
+    private intentKeeper: RenderingIntentKeeper | null = null;
 
     private currentStage = { episode: 1, stage: 1 } as const;
     private startHooks: NavigationStartHooks | null = null;
@@ -371,7 +376,11 @@ export class NavigationScene {
                 new OctreeUnit(),
 
                 // WARMING phase
+                // 1. Navigation-specific emissive materials (path effects, nodes)
                 MaterialWarmupUnit.createNavigationWarmupUnit(),
+                // 2. Scene-wide material warmup (🅰️+ Active Engagement Strategy)
+                //    Warms ALL materials from loaded meshes including TacticalGrid and character
+                SceneMaterialWarmupUnit.createForNavigation(),
 
                 // BARRIER phase
                 RenderReadyBarrierUnit.createForNavigation({
@@ -506,6 +515,14 @@ export class NavigationScene {
                 });
                 this.captureProbe?.markPhase('ENGINE_AWAKENED_PASSED');
                 this.flightRecorder?.markPhase('ENGINE_AWAKENED_PASSED');
+
+                // ===== ACTIVE ENGAGEMENT: Start Rendering Intent Keeper (🅰️+) =====
+                // Signal to Chromium that this is an active real-time graphics app.
+                // The keeper registers a read-only onBeforeRender observer that performs
+                // minimal computation each frame, persuading the browser scheduler to
+                // maintain active GPU scheduling.
+                this.intentKeeper = new RenderingIntentKeeper(this.scene, { debug: false });
+                this.intentKeeper.start();
 
                 // ===== CAMERA TRANSITION (starts grid visibility animation) =====
                 // The camera transition controls hologram visibility (0→1 over 1.1s).
@@ -912,6 +929,10 @@ export class NavigationScene {
         this.forensicProbe?.dispose();
         this.captureProbe?.dispose();
         this.flightRecorder?.dispose();
+
+        // Active Engagement: Dispose intent keeper
+        this.intentKeeper?.dispose();
+        this.intentKeeper = null;
 
         if (this.characterLoadUnit) {
             this.characterLoadUnit.dispose();

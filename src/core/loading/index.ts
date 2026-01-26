@@ -39,6 +39,10 @@ export type { ProtocolOptions, ProtocolResult } from './unit/LoadingProtocol';
 export { MaterialWarmupUnit } from './unit/MaterialWarmupUnit';
 export type { MaterialWarmupConfig, MaterialFactory as UnitMaterialFactory } from './unit/MaterialWarmupUnit';
 
+// Scene-wide Material Warmup (Active Engagement Strategy)
+export { SceneMaterialWarmupUnit } from './unit/SceneMaterialWarmupUnit';
+export type { SceneMaterialWarmupConfig } from './unit/SceneMaterialWarmupUnit';
+
 // Barrier Unit
 export { RenderReadyBarrierUnit } from './unit/RenderReadyBarrierUnit';
 export type { BarrierUnitConfig } from './unit/RenderReadyBarrierUnit';
@@ -117,6 +121,12 @@ export type { LoadingState, LoadingEvents } from './progress/LoadingStateEmitter
 // ========================================
 export { ArcanaLoadingOrchestrator } from './orchestrator/ArcanaLoadingOrchestrator';
 export type { OrchestratorConfig, OrchestratorCallbacks } from './orchestrator/ArcanaLoadingOrchestrator';
+
+// ========================================
+// Active Engagement Strategy (🅰️+)
+// ========================================
+export { RenderingIntentKeeper } from './engagement/RenderingIntentKeeper';
+export type { RenderingIntentKeeperConfig, IntentMetrics } from './engagement/RenderingIntentKeeper';
 
 // ========================================
 // Legacy: MaterialWarmupHelper (호환성)
