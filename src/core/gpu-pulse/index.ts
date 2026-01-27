@@ -59,6 +59,7 @@ export { PulseTransferGate, type PulseTransferGateConfig } from './PulseTransfer
 export { EmergencyPulseRecovery, createEmergencyRecovery, type EmergencyRecoverySystemConfig } from './EmergencyPulseRecovery';
 export { PulseDebugOverlay, createPulseDebugOverlay, type PulseDebugOverlayConfig } from './PulseDebugOverlay';
 export { RAFHealthTracker, createRAFHealthTracker, RAFHealthStatus, RAF_THRESHOLDS, type RAFHealthMetrics, type RAFHealthCallbacks } from './RAFHealthTracker';
+export { RAFWarmupGate, createRAFWarmupGate, WarmupGateState, type RAFWarmupGateConfig, type WarmupResult } from './RAFWarmupGate';
 
 // ============================================================
 // Convenience Factory: GPUPulseSystem
@@ -72,6 +73,7 @@ import { PulseTransferGate } from './PulseTransferGate';
 import { EmergencyPulseRecovery, createEmergencyRecovery } from './EmergencyPulseRecovery';
 import { PulseDebugOverlay, createPulseDebugOverlay } from './PulseDebugOverlay';
 import { RAFHealthTracker, createRAFHealthTracker, RAFHealthStatus } from './RAFHealthTracker';
+import { RAFWarmupGate, createRAFWarmupGate, type WarmupResult } from './RAFWarmupGate';
 
 /**
  * Configuration for GPUPulseSystem
@@ -91,6 +93,12 @@ export interface GPUPulseSystemConfig {
     safetyNetStabilityFrames?: number;
     /** Maximum time to keep Host active as safety net after transfer (ms, default: 5000) */
     safetyNetTimeoutMs?: number;
+    /** Number of consecutive stable RAF frames required before loading can start (default: 15) */
+    warmupStableFrames?: number;
+    /** Maximum frame interval (ms) considered "healthy" for warmup (default: 25) */
+    warmupHealthyThresholdMs?: number;
+    /** Maximum time to wait for warmup (ms) before proceeding anyway (default: 3000) */
+    warmupTimeoutMs?: number;
 }
 
 /**
@@ -106,6 +114,7 @@ export class GPUPulseSystem {
     private readonly renderHost: PulseRenderHost;
     private readonly emergencyRecovery: EmergencyPulseRecovery;
     private readonly rafHealthTracker: RAFHealthTracker;
+    private readonly warmupGate: RAFWarmupGate;
     private debugOverlay: PulseDebugOverlay | null = null;
 
     // Receiver (set when game scene registers)
@@ -139,6 +148,14 @@ export class GPUPulseSystem {
 
         // Create render host (loading pulse provider)
         this.renderHost = createPulseRenderHost(scene, config.debug);
+
+        // Create warmup gate (ensures RAF is stable before heavy work)
+        this.warmupGate = createRAFWarmupGate(scene, {
+            requiredStableFrames: config.warmupStableFrames ?? 15,
+            healthyThresholdMs: config.warmupHealthyThresholdMs ?? 25,
+            timeoutMs: config.warmupTimeoutMs ?? 3000,
+            debug: config.debug,
+        });
 
         // Create RAF health tracker (silent - no callbacks that log)
         this.rafHealthTracker = createRAFHealthTracker(false);
@@ -224,6 +241,29 @@ export class GPUPulseSystem {
         }
 
         this.isStarted = true;
+    }
+
+    /**
+     * Wait for RAF warm-up to complete.
+     *
+     * CRITICAL: Call this AFTER beginPulse() and BEFORE starting any heavy loading work.
+     *
+     * This ensures:
+     * - GPU Pulse is stable before heavy work begins
+     * - Chromium recognizes the app as actively rendering
+     * - RAF scheduling won't be throttled due to early blocking
+     *
+     * @returns Promise that resolves when RAF is stable (or timeout reached)
+     */
+    public async waitForWarmup(): Promise<WarmupResult> {
+        return this.warmupGate.waitForStable();
+    }
+
+    /**
+     * Check if warmup gate is open (RAF is stable)
+     */
+    public isWarmupComplete(): boolean {
+        return this.warmupGate.isOpen();
     }
 
     /**
