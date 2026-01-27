@@ -21,7 +21,17 @@ export class OctreeUnit extends BaseLoadUnit {
     ): Promise<void> {
         onProgress?.({ progress: 0, message: 'Building selection octree...' });
 
+        // Phase 2.7: Forensic profiling - measure octree creation time
+        const meshCount = scene.meshes.length;
+        performance.mark('octree-start');
+
         scene.createOrUpdateSelectionOctree();
+
+        performance.mark('octree-end');
+        performance.measure('octree-creation', 'octree-start', 'octree-end');
+        const measure = performance.getEntriesByName('octree-creation', 'measure')[0] as PerformanceMeasure;
+        const blockingFlag = measure.duration > 50 ? ' ⚠️ BLOCKING' : '';
+        console.log(`[OctreeUnit] Octree created: ${measure.duration.toFixed(1)}ms for ${meshCount} meshes${blockingFlag}`);
 
         onProgress?.({ progress: 1, message: 'Octree ready' });
     }

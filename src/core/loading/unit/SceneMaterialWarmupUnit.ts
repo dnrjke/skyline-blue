@@ -92,8 +92,17 @@ export class SceneMaterialWarmupUnit extends BaseLoadUnit {
         this.skippedCount = 0;
         this.failedCount = 0;
 
+        // Phase 2.7: Forensic profiling - measure target collection time
+        performance.mark('warmup-collect-start');
+
         // Collect all unique material-mesh pairs
         const targets = this.collectWarmupTargets(scene);
+
+        performance.mark('warmup-collect-end');
+        performance.measure('warmup-collect', 'warmup-collect-start', 'warmup-collect-end');
+        const collectMeasure = performance.getEntriesByName('warmup-collect', 'measure')[0] as PerformanceMeasure;
+        const collectBlockingFlag = collectMeasure.duration > 50 ? ' ⚠️ BLOCKING' : '';
+        console.log(`[SceneMaterialWarmup] Collected ${targets.length} targets: ${collectMeasure.duration.toFixed(1)}ms${collectBlockingFlag}`);
 
         if (targets.length === 0) {
             if (this.config.debug) {

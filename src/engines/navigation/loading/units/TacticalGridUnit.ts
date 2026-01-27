@@ -40,7 +40,17 @@ export class TacticalGridUnit extends BaseLoadUnit {
 
         const { hologram, initialVisibility = 0 } = this.config;
 
+        // Phase 2.7: Forensic profiling - measure hologram enable time
+        performance.mark('hologram-enable-start');
+
         hologram.enable();
+
+        performance.mark('hologram-enable-end');
+        performance.measure('hologram-enable', 'hologram-enable-start', 'hologram-enable-end');
+        const measure = performance.getEntriesByName('hologram-enable', 'measure')[0] as PerformanceMeasure;
+        const blockingFlag = measure.duration > 50 ? ' ⚠️ BLOCKING' : '';
+        console.log(`[TacticalGridUnit] Hologram enabled: ${measure.duration.toFixed(1)}ms${blockingFlag}`);
+
         hologram.setVisibility(initialVisibility);
 
         onProgress?.({ progress: 1, message: 'Tactical grid ready' });
