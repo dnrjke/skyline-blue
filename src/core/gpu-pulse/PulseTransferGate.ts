@@ -338,6 +338,8 @@ export class PulseTransferGate {
         if (!conditions.cameraProjectionReady) failed.push('cameraProjectionReady');
         if (!conditions.canDrawOneFrame) failed.push('canDrawOneFrame');
         if (!conditions.hasRenderableMesh) failed.push('hasRenderableMesh');
+        if (!conditions.rafHealthy) failed.push('rafHealthy');
+        if (!conditions.rafStable) failed.push('rafStable');
 
         return failed;
     }

@@ -12,6 +12,7 @@ import { INTRO_STORY } from './data/stories';
 import type { NavigationEngine } from '../engines/navigation';
 import type { StageTransitionManager } from '../core/scene/StageTransitionManager';
 import { NavigationDebugger } from '../debug/NavigationDebugger';
+import { EntryPointAudit, createEntryPointAudit } from '../core/debug/EntryPointAudit';
 
 type FlowState = 'splash' | 'touchToStart' | 'narrative' | 'navigation' | 'complete';
 
@@ -56,6 +57,9 @@ export class FlowController {
     // Debug tools (F9 toggle)
     private navigationDebugger: NavigationDebugger | null = null;
     private debugKeyHandler: ((e: KeyboardEvent) => void) | null = null;
+
+    // Phase 0: Entry Point Audit (diagnose blackhole freeze)
+    private entryPointAudit: EntryPointAudit | null = null;
 
     constructor(deps: FlowControllerDeps) {
         this.scene = deps.scene;
@@ -218,6 +222,15 @@ export class FlowController {
         this.narrativeEngine.setCallbacks({
             onSequenceEnd: () => {
                 console.log('[System] Narrative sequence ended');
+
+                // ===== PHASE 0: Entry Point Audit =====
+                // Start audit BEFORE navigation to capture the hand-over moment
+                this.entryPointAudit = createEntryPointAudit(
+                    this.scene.getEngine() as BABYLON.Engine,
+                    this.scene
+                );
+                this.entryPointAudit.markScenarioEnd();
+
                 this.startFlow('navigation');
             },
             onEvent: (eventName, payload) => this.handleNarrativeEvent(eventName, payload),
@@ -226,6 +239,10 @@ export class FlowController {
 
     private startNavigation(): void {
         console.log('[System] Starting Phase 2: Navigation...');
+
+        // ===== PHASE 0: Entry Point Audit - Mark loading start =====
+        this.entryPointAudit?.markLoadingStart();
+
         this.bottomVignetteLayer.hide();
         this.characterLayer.hideAll();
         // Phase 2 Navigation은 3D TacticalHologram(scene.clearColor + grid)이 배경을 소유한다.
@@ -248,6 +265,15 @@ export class FlowController {
                 dbg.begin('Navigation Start');
                 log('Starting Navigation...');
                 setProgress(0.02);
+
+                // ===== PHASE 0: Entry Point Audit - Complete after 500ms =====
+                // Give enough time to collect 10+ frames for the audit report
+                setTimeout(() => {
+                    if (this.entryPointAudit) {
+                        this.entryPointAudit.complete();
+                        // Keep audit alive for later inspection, dispose in onFlowComplete
+                    }
+                }, 500);
 
                 // IMPORTANT:
                 // - Navigation의 준비(onReady)까지 기다린다.
@@ -332,6 +358,12 @@ export class FlowController {
 
         // Debug tools 정리
         this.cleanupDebugTools();
+
+        // Entry Point Audit 정리
+        if (this.entryPointAudit) {
+            this.entryPointAudit.dispose();
+            this.entryPointAudit = null;
+        }
     }
 
     // ============================================

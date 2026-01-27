@@ -66,6 +66,10 @@ export interface PulseTransferConditions {
     canDrawOneFrame: boolean;
     /** Scene has at least one renderable mesh */
     hasRenderableMesh: boolean;
+    /** RAF (requestAnimationFrame) is running at healthy rate */
+    rafHealthy: boolean;
+    /** RAF has been stable for enough consecutive frames */
+    rafStable: boolean;
 }
 
 /**

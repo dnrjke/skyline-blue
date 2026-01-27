@@ -356,7 +356,6 @@ export class NavigationScene {
 
             // Begin GPU Pulse - Loading Host now owns the pulse
             this.gpuPulseSystem.beginPulse('navigation-loading');
-            console.log('[GPUPulse] Pulse BEGIN - Loading Host active');
 
             // Create orchestrator
             this.orchestrator = new ArcanaLoadingOrchestrator(this.scene, {
@@ -566,20 +565,9 @@ export class NavigationScene {
                 // ===== GPU PULSE TRANSFER (Phase 2.6) =====
                 // Transfer pulse ownership from Loading Host to Game Scene.
                 // This is the atomic handoff - no blank frames allowed.
+                // Transfer will be blocked if RAF is throttled - retry until healthy.
                 if (this.gpuPulseSystem) {
-                    const transferConditions: PulseTransferConditions = {
-                        transformMatrixValid: true,
-                        cameraProjectionReady: !!this.navigationCamera && !this.navigationCamera.isDisposed(),
-                        canDrawOneFrame: true,
-                        hasRenderableMesh: this.scene.meshes.length > 0,
-                    };
-
-                    const transferred = this.gpuPulseSystem.transferToGame(transferConditions);
-                    if (transferred) {
-                        console.log('[GPUPulse] Pulse TRANSFERRED to Game Scene');
-                    } else {
-                        console.warn('[GPUPulse] Transfer FAILED - Loading Host continues');
-                    }
+                    this.attemptPulseTransferWithRetry();
                 }
 
                 // ===== CAMERA TRANSITION (starts grid visibility animation) =====
@@ -974,12 +962,13 @@ export class NavigationScene {
                     cameraProjectionReady: !!self.navigationCamera && !self.navigationCamera.isDisposed(),
                     canDrawOneFrame: self.active,
                     hasRenderableMesh: self.scene.meshes.filter(m => m.isVisible && !m.isDisposed()).length > 0,
+                    // RAF health is checked by GPUPulseSystem, not by receiver
+                    rafHealthy: true,
+                    rafStable: true,
                 };
             },
 
             onPulseReceived(): void {
-                console.log('[NavigationScene] Pulse ownership RECEIVED');
-
                 // Start reporting frames to maintain pulse health
                 if (!frameReportObserver) {
                     frameReportObserver = self.scene.onAfterRenderObservable.add(() => {
@@ -990,8 +979,6 @@ export class NavigationScene {
             },
 
             onPulseRevoked(): void {
-                console.warn('[NavigationScene] Pulse ownership REVOKED (emergency recovery)');
-
                 // Stop reporting frames
                 if (frameReportObserver) {
                     self.scene.onAfterRenderObservable.remove(frameReportObserver);
@@ -1004,6 +991,47 @@ export class NavigationScene {
                 // The actual frame report is handled by the gate's wiring
             },
         };
+    }
+
+    /**
+     * Attempt pulse transfer with retry if RAF is not healthy.
+     * The transfer will be blocked if RAF is throttled.
+     */
+    private attemptPulseTransferWithRetry(
+        maxAttempts: number = 10,
+        retryIntervalMs: number = 500
+    ): void {
+        if (!this.gpuPulseSystem) return;
+
+        let attempts = 0;
+        const tryTransfer = () => {
+            attempts++;
+
+            // Build transfer conditions
+            const transferConditions: PulseTransferConditions = {
+                transformMatrixValid: true,
+                cameraProjectionReady: !!this.navigationCamera && !this.navigationCamera.isDisposed(),
+                canDrawOneFrame: true,
+                hasRenderableMesh: this.scene.meshes.length > 0,
+                // RAF health will be checked internally by GPUPulseSystem
+                rafHealthy: false, // Will be overridden by system
+                rafStable: false,  // Will be overridden by system
+            };
+
+            const transferred = this.gpuPulseSystem?.transferToGame(transferConditions);
+
+            if (transferred) {
+                return; // Success
+            }
+
+            // Check if we should retry
+            if (attempts < maxAttempts && this.active && !this.scene.isDisposed) {
+                setTimeout(tryTransfer, retryIntervalMs);
+            }
+        };
+
+        // Start first attempt
+        tryTransfer();
     }
 
     private disposeEnvironment(): void {

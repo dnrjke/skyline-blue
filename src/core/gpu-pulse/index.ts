@@ -58,6 +58,7 @@ export { PulseRenderHost, createPulseRenderHost, type PulseRenderHostConfig } fr
 export { PulseTransferGate, type PulseTransferGateConfig } from './PulseTransferGate';
 export { EmergencyPulseRecovery, createEmergencyRecovery, type EmergencyRecoverySystemConfig } from './EmergencyPulseRecovery';
 export { PulseDebugOverlay, createPulseDebugOverlay, type PulseDebugOverlayConfig } from './PulseDebugOverlay';
+export { RAFHealthTracker, createRAFHealthTracker, RAFHealthStatus, RAF_THRESHOLDS, type RAFHealthMetrics, type RAFHealthCallbacks } from './RAFHealthTracker';
 
 // ============================================================
 // Convenience Factory: GPUPulseSystem
@@ -70,6 +71,7 @@ import { PulseRenderHost, createPulseRenderHost } from './PulseRenderHost';
 import { PulseTransferGate } from './PulseTransferGate';
 import { EmergencyPulseRecovery, createEmergencyRecovery } from './EmergencyPulseRecovery';
 import { PulseDebugOverlay, createPulseDebugOverlay } from './PulseDebugOverlay';
+import { RAFHealthTracker, createRAFHealthTracker, RAFHealthStatus } from './RAFHealthTracker';
 
 /**
  * Configuration for GPUPulseSystem
@@ -85,6 +87,10 @@ export interface GPUPulseSystemConfig {
     recoveryTimeoutMs?: number;
     /** Max recovery retries (default: 3) */
     maxRecoveryRetries?: number;
+    /** Consecutive stable frames required before deactivating Host safety net (default: 30) */
+    safetyNetStabilityFrames?: number;
+    /** Maximum time to keep Host active as safety net after transfer (ms, default: 5000) */
+    safetyNetTimeoutMs?: number;
 }
 
 /**
@@ -99,6 +105,7 @@ export class GPUPulseSystem {
     private readonly transferGate: PulseTransferGate;
     private readonly renderHost: PulseRenderHost;
     private readonly emergencyRecovery: EmergencyPulseRecovery;
+    private readonly rafHealthTracker: RAFHealthTracker;
     private debugOverlay: PulseDebugOverlay | null = null;
 
     // Receiver (set when game scene registers)
@@ -108,11 +115,22 @@ export class GPUPulseSystem {
     private isStarted: boolean = false;
     private disposed: boolean = false;
 
+    // Safety net state - keeps Host active after transfer until Game proves stable
+    private safetyNetActive: boolean = false;
+    private safetyNetStartTime: number = 0;
+    private safetyNetStableFrames: number = 0;
+    private readonly safetyNetStabilityFrames: number;
+    private readonly safetyNetTimeoutMs: number;
+
     private constructor(
         _engine: BABYLON.Engine,
         scene: BABYLON.Scene,
         config: GPUPulseSystemConfig = {}
     ) {
+        // Safety net configuration
+        this.safetyNetStabilityFrames = config.safetyNetStabilityFrames ?? 30;
+        this.safetyNetTimeoutMs = config.safetyNetTimeoutMs ?? 5000;
+
         // Create transfer gate (the arbiter)
         this.transferGate = new PulseTransferGate({
             scene,
@@ -122,6 +140,21 @@ export class GPUPulseSystem {
         // Create render host (loading pulse provider)
         this.renderHost = createPulseRenderHost(scene, config.debug);
 
+        // Create RAF health tracker (silent - no callbacks that log)
+        this.rafHealthTracker = createRAFHealthTracker(false);
+        this.rafHealthTracker.setCallbacks({
+            onThrottleDetected: () => {
+                // If Game Scene owns pulse and RAF throttles, trigger recovery
+                if (this.transferGate.getCurrentOwner() === PulseOwner.GAME_SCENE) {
+                    this.activateSafetyNet();
+                }
+            },
+            onStabilized: () => {
+                // Check if we can deactivate safety net
+                this.checkSafetyNetDeactivation();
+            },
+        });
+
         // Create emergency recovery
         this.emergencyRecovery = createEmergencyRecovery(this.transferGate, {
             timeoutMs: config.recoveryTimeoutMs ?? 500,
@@ -129,6 +162,7 @@ export class GPUPulseSystem {
             onRecoveryStart: () => {
                 // Re-activate host on recovery
                 this.renderHost.activate();
+                this.safetyNetActive = true;
             },
         });
 
@@ -146,8 +180,6 @@ export class GPUPulseSystem {
                 this.emergencyRecovery
             );
         }
-
-        console.log('[GPUPulseSystem] Created');
     }
 
     /**
@@ -169,9 +201,8 @@ export class GPUPulseSystem {
      * Begin GPU Pulse with Loading Host
      * Call this at the start of loading phase
      */
-    public beginPulse(context: string): void {
+    public beginPulse(_context: string): void {
         if (this.isStarted) {
-            console.warn('[GPUPulseSystem] beginPulse called but already started');
             return;
         }
 
@@ -193,8 +224,6 @@ export class GPUPulseSystem {
         }
 
         this.isStarted = true;
-
-        console.log(`[GPUPulseSystem] Pulse BEGIN: ${context}`);
     }
 
     /**
@@ -204,36 +233,93 @@ export class GPUPulseSystem {
     public registerGameScene(receiver: IGPUPulseReceiver): void {
         this.receiver = receiver;
         this.transferGate.registerReceiver(receiver);
-
-        console.log(`[GPUPulseSystem] Game scene registered: ${receiver.id}`);
     }
 
     /**
      * Attempt to transfer pulse ownership to game scene
      * Returns true if transfer successful
+     *
+     * IMPORTANT: This now checks RAF health and keeps Host active as safety net
      */
     public transferToGame(conditions: PulseTransferConditions): boolean {
         if (!this.receiver) {
-            console.error('[GPUPulseSystem] Cannot transfer: no game scene registered');
+            return false;
+        }
+
+        // Augment conditions with RAF health status
+        const rafMetrics = this.rafHealthTracker.getMetrics();
+        const augmentedConditions: PulseTransferConditions = {
+            ...conditions,
+            rafHealthy: this.rafHealthTracker.isHealthyForTransfer(),
+            rafStable: this.rafHealthTracker.isStableForTransfer(),
+        };
+
+        // Block transfer if RAF is throttled
+        if (rafMetrics.status === RAFHealthStatus.THROTTLED ||
+            rafMetrics.status === RAFHealthStatus.SEVERE_THROTTLED) {
             return false;
         }
 
         const success = this.transferGate.requestTransfer(
             PulseOwner.GAME_SCENE,
-            conditions
+            augmentedConditions
         );
 
         if (success) {
-            // Deactivate render host after transfer
-            // Note: This happens on the next frame due to transfer gate's atomic design
-            setTimeout(() => {
-                if (this.transferGate.getCurrentOwner() === PulseOwner.GAME_SCENE) {
-                    this.renderHost.deactivate();
-                }
-            }, 100);
+            // CRITICAL CHANGE: Activate safety net instead of deactivating Host
+            // Host stays active as backup until Game Scene proves stable
+            this.activateSafetyNet();
         }
 
         return success;
+    }
+
+    /**
+     * Activate the safety net - keeps Host active after transfer
+     */
+    private activateSafetyNet(): void {
+        this.safetyNetActive = true;
+        this.safetyNetStartTime = performance.now();
+        this.safetyNetStableFrames = 0;
+        // Host stays active - do NOT deactivate
+    }
+
+    /**
+     * Check if safety net can be deactivated
+     * Called when RAF stabilizes
+     */
+    private checkSafetyNetDeactivation(): void {
+        if (!this.safetyNetActive) return;
+
+        const currentOwner = this.transferGate.getCurrentOwner();
+        if (currentOwner !== PulseOwner.GAME_SCENE) {
+            // Not in Game Scene mode, keep safety net
+            return;
+        }
+
+        const rafMetrics = this.rafHealthTracker.getMetrics();
+
+        // Check if Game Scene has maintained stability
+        if (rafMetrics.consecutiveHealthyFrames >= this.safetyNetStabilityFrames) {
+            this.deactivateSafetyNet();
+            return;
+        }
+
+        // Check timeout
+        const elapsed = performance.now() - this.safetyNetStartTime;
+        if (elapsed >= this.safetyNetTimeoutMs) {
+            this.deactivateSafetyNet();
+        }
+    }
+
+    /**
+     * Deactivate safety net and Host
+     */
+    private deactivateSafetyNet(): void {
+        this.safetyNetActive = false;
+        if (this.transferGate.getCurrentOwner() === PulseOwner.GAME_SCENE) {
+            this.renderHost.deactivate();
+        }
     }
 
     /**
@@ -242,8 +328,6 @@ export class GPUPulseSystem {
     public reclaimToHost(): void {
         this.transferGate.forceTransfer(PulseOwner.LOADING_HOST);
         this.renderHost.activate();
-
-        console.log('[GPUPulseSystem] Pulse RECLAIMED to Loading Host');
     }
 
     /**
@@ -262,8 +346,6 @@ export class GPUPulseSystem {
         }
 
         this.isStarted = false;
-
-        console.log('[GPUPulseSystem] Pulse END');
     }
 
     /**
@@ -278,6 +360,34 @@ export class GPUPulseSystem {
      */
     public isHealthy(): boolean {
         return this.emergencyRecovery.getHealthMetrics().isHealthy;
+    }
+
+    /**
+     * Check if RAF is healthy for transfer
+     */
+    public isRAFHealthy(): boolean {
+        return this.rafHealthTracker.isHealthyForTransfer();
+    }
+
+    /**
+     * Check if RAF is stable (consistent healthy frames)
+     */
+    public isRAFStable(): boolean {
+        return this.rafHealthTracker.isStableForTransfer();
+    }
+
+    /**
+     * Get RAF health metrics
+     */
+    public getRAFMetrics() {
+        return this.rafHealthTracker.getMetrics();
+    }
+
+    /**
+     * Check if safety net is currently active
+     */
+    public isSafetyNetActive(): boolean {
+        return this.safetyNetActive;
     }
 
     /**
@@ -303,8 +413,6 @@ export class GPUPulseSystem {
         this.renderHost.dispose();
 
         this.disposed = true;
-
-        console.log('[GPUPulseSystem] Disposed');
     }
 
     // ============================================================
@@ -316,17 +424,39 @@ export class GPUPulseSystem {
         this.renderHost.setFrameCallback((_drawCalls) => {
             this.emergencyRecovery.reportFrame(PulseOwner.LOADING_HOST);
             this.debugOverlay?.reportFrame();
+            // Track RAF health on every Host frame
+            this.rafHealthTracker.recordFrame();
         });
 
         // Connect transfer gate frame callback to recovery monitoring
         this.transferGate.setFrameCallback((owner, _drawCalls) => {
             this.emergencyRecovery.reportFrame(owner);
             this.debugOverlay?.reportFrame();
+            // Track RAF health on every Gate frame
+            this.rafHealthTracker.recordFrame();
+
+            // Track safety net stability when Game Scene owns pulse
+            if (this.safetyNetActive && owner === PulseOwner.GAME_SCENE) {
+                const rafMetrics = this.rafHealthTracker.getMetrics();
+                if (rafMetrics.lastFrameInterval < 50) {
+                    this.safetyNetStableFrames++;
+                    // Check for deactivation every frame during safety net
+                    if (this.safetyNetStableFrames >= this.safetyNetStabilityFrames) {
+                        this.checkSafetyNetDeactivation();
+                    }
+                } else {
+                    // Reset stability count on slow frame
+                    this.safetyNetStableFrames = 0;
+                }
+            }
         });
 
         // Connect ownership change callback
-        this.transferGate.setOwnershipCallback((from, to, frameNumber) => {
-            console.log(`[GPUPulseSystem] Ownership: ${from} -> ${to} at frame ${frameNumber}`);
+        this.transferGate.setOwnershipCallback((from, to, _frameNumber) => {
+            // Reset RAF tracker on ownership change
+            if (from !== to) {
+                this.rafHealthTracker.reset();
+            }
         });
     }
 }
