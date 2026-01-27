@@ -99,9 +99,6 @@ export class EntryPointAudit {
      */
     public markScenarioEnd(): void {
         this.scenarioEndTime = performance.now();
-        console.log(`${LOG_PREFIX} ========================================`);
-        console.log(`${LOG_PREFIX} SCENARIO END MARKED: t=${this.scenarioEndTime.toFixed(1)}ms`);
-        console.log(`${LOG_PREFIX} ========================================`);
 
         // Start blocking detector
         this.startBlockingDetector();
@@ -116,8 +113,6 @@ export class EntryPointAudit {
      */
     public markLoadingStart(): void {
         this.loadingStartTime = performance.now();
-        const delta = this.loadingStartTime - this.scenarioEndTime;
-        console.log(`${LOG_PREFIX} LOADING START: t=${this.loadingStartTime.toFixed(1)}ms, Δt=${delta.toFixed(1)}ms from scenario end`);
 
         // Capture WebGL/Canvas health at this moment
         this.captureHealthSnapshot();
@@ -207,8 +202,6 @@ export class EntryPointAudit {
         this.heartbeatState.frameCount = 0;
         this.heartbeatState.frameTimestamps = [];
 
-        console.log(`${LOG_PREFIX} HEARTBEAT STARTED: t=${this.heartbeatState.startTime.toFixed(1)}ms`);
-
         // Create observer with high priority to run first
         this.heartbeatState.observer = this.scene.onBeforeRenderObservable.add(() => {
             const now = performance.now();
@@ -216,8 +209,6 @@ export class EntryPointAudit {
             // Record first RAF time
             if (this.heartbeatState.frameCount === 0) {
                 this.firstRAFTime = now;
-                const gapFromScenarioEnd = this.firstRAFTime - this.scenarioEndTime;
-                console.log(`${LOG_PREFIX} FIRST RAF: t=${now.toFixed(1)}ms, gap=${gapFromScenarioEnd.toFixed(1)}ms from scenario end`);
             }
 
             this.heartbeatState.frameTimestamps.push(now);
@@ -232,22 +223,6 @@ export class EntryPointAudit {
                 // Microscopic change to force render
                 this.scene.clearColor.r = Math.max(0, Math.min(1, baseColor.r + microShift));
             }
-
-            // Log first 10 frames
-            if (this.heartbeatState.frameCount <= 10) {
-                const interval = this.heartbeatState.frameCount > 1
-                    ? now - this.heartbeatState.frameTimestamps[this.heartbeatState.frameTimestamps.length - 2]
-                    : 0;
-                console.log(
-                    `${LOG_PREFIX} Frame #${this.heartbeatState.frameCount}: ` +
-                    `t=${now.toFixed(1)}ms, interval=${interval.toFixed(1)}ms, fps=${this.engine.getFps().toFixed(1)}`
-                );
-            }
-
-            // Auto-complete after 10 frames if not manually completed
-            if (this.heartbeatState.frameCount === 10 && !this.report) {
-                console.log(`${LOG_PREFIX} 10 frames collected - audit data ready`);
-            }
         }, -900); // High priority, but after pulse system
     }
 
@@ -260,7 +235,6 @@ export class EntryPointAudit {
         }
 
         this.heartbeatState.active = false;
-        console.log(`${LOG_PREFIX} HEARTBEAT STOPPED after ${this.heartbeatState.frameCount} frames`);
     }
 
     // ============================================================
@@ -282,11 +256,8 @@ export class EntryPointAudit {
 
             // Expected gap: ~10ms. If much larger, there was blocking.
             const blockingTime = gap - 10;
-            if (blockingTime > 50) {
-                console.warn(`${LOG_PREFIX} BLOCKING DETECTED: ${blockingTime.toFixed(1)}ms at t=${now.toFixed(1)}ms`);
-                if (blockingTime > this.maxBlockingTime) {
-                    this.maxBlockingTime = blockingTime;
-                }
+            if (blockingTime > this.maxBlockingTime) {
+                this.maxBlockingTime = blockingTime;
             }
 
             this.lastTickTime = now;
@@ -305,15 +276,7 @@ export class EntryPointAudit {
     // ============================================================
 
     private captureHealthSnapshot(): void {
-        const gl = this.engine._gl as WebGLRenderingContext | null;
-        const contextLost = gl ? gl.isContextLost() : false;
-        const fps = this.engine.getFps();
-
-        console.log(`${LOG_PREFIX} HEALTH SNAPSHOT:`);
-        console.log(`  - Canvas: ${this.canvas.width}x${this.canvas.height}`);
-        console.log(`  - WebGL Context Lost: ${contextLost}`);
-        console.log(`  - Engine FPS: ${fps.toFixed(1)}`);
-        console.log(`  - Heartbeat frames so far: ${this.heartbeatState.frameCount}`);
+        // Data is captured, will be included in final report
     }
 
     private isWebGLContextLost(): boolean {

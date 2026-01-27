@@ -356,7 +356,6 @@ export class NavigationScene {
 
             // Begin GPU Pulse - Loading Host now owns the pulse
             this.gpuPulseSystem.beginPulse('navigation-loading');
-            console.log('[GPUPulse] Pulse BEGIN - Loading Host active');
 
             // Create orchestrator
             this.orchestrator = new ArcanaLoadingOrchestrator(this.scene, {
@@ -970,8 +969,6 @@ export class NavigationScene {
             },
 
             onPulseReceived(): void {
-                console.log('[NavigationScene] Pulse ownership RECEIVED');
-
                 // Start reporting frames to maintain pulse health
                 if (!frameReportObserver) {
                     frameReportObserver = self.scene.onAfterRenderObservable.add(() => {
@@ -982,8 +979,6 @@ export class NavigationScene {
             },
 
             onPulseRevoked(): void {
-                console.warn('[NavigationScene] Pulse ownership REVOKED (emergency recovery)');
-
                 // Stop reporting frames
                 if (frameReportObserver) {
                     self.scene.onAfterRenderObservable.remove(frameReportObserver);
@@ -1023,27 +1018,15 @@ export class NavigationScene {
                 rafStable: false,  // Will be overridden by system
             };
 
-            const rafMetrics = this.gpuPulseSystem?.getRAFMetrics();
-            console.log(
-                `[GPUPulse] Transfer attempt #${attempts}/${maxAttempts} - ` +
-                `RAF: ${rafMetrics?.status ?? 'unknown'}, ` +
-                `avg=${rafMetrics?.averageFrameInterval.toFixed(1) ?? 0}ms, ` +
-                `fps=${rafMetrics?.estimatedFPS ?? 0}`
-            );
-
             const transferred = this.gpuPulseSystem?.transferToGame(transferConditions);
 
             if (transferred) {
-                console.log(`[GPUPulse] Pulse TRANSFERRED to Game Scene (attempt #${attempts})`);
                 return; // Success
             }
 
             // Check if we should retry
             if (attempts < maxAttempts && this.active && !this.scene.isDisposed) {
-                console.log(`[GPUPulse] Transfer attempt #${attempts} failed - retrying in ${retryIntervalMs}ms`);
                 setTimeout(tryTransfer, retryIntervalMs);
-            } else {
-                console.error(`[GPUPulse] Transfer FAILED after ${attempts} attempts - Loading Host continues as owner`);
             }
         };
 

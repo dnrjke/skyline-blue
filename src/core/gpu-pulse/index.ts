@@ -140,22 +140,16 @@ export class GPUPulseSystem {
         // Create render host (loading pulse provider)
         this.renderHost = createPulseRenderHost(scene, config.debug);
 
-        // Create RAF health tracker
-        this.rafHealthTracker = createRAFHealthTracker(config.debug);
+        // Create RAF health tracker (silent - no callbacks that log)
+        this.rafHealthTracker = createRAFHealthTracker(false);
         this.rafHealthTracker.setCallbacks({
-            onThrottleDetected: (metrics) => {
-                console.warn(`[GPUPulseSystem] RAF THROTTLED: ${metrics.averageFrameInterval.toFixed(1)}ms avg, ${metrics.estimatedFPS}fps`);
+            onThrottleDetected: () => {
                 // If Game Scene owns pulse and RAF throttles, trigger recovery
                 if (this.transferGate.getCurrentOwner() === PulseOwner.GAME_SCENE) {
-                    console.warn('[GPUPulseSystem] Throttle detected during GAME ownership - activating safety net');
                     this.activateSafetyNet();
                 }
             },
-            onThrottleRecovered: (metrics) => {
-                console.log(`[GPUPulseSystem] RAF recovered: ${metrics.estimatedFPS}fps`);
-            },
-            onStabilized: (metrics) => {
-                console.log(`[GPUPulseSystem] RAF STABILIZED: ${metrics.consecutiveHealthyFrames} healthy frames`);
+            onStabilized: () => {
                 // Check if we can deactivate safety net
                 this.checkSafetyNetDeactivation();
             },
@@ -186,8 +180,6 @@ export class GPUPulseSystem {
                 this.emergencyRecovery
             );
         }
-
-        console.log('[GPUPulseSystem] Created');
     }
 
     /**
@@ -209,9 +201,8 @@ export class GPUPulseSystem {
      * Begin GPU Pulse with Loading Host
      * Call this at the start of loading phase
      */
-    public beginPulse(context: string): void {
+    public beginPulse(_context: string): void {
         if (this.isStarted) {
-            console.warn('[GPUPulseSystem] beginPulse called but already started');
             return;
         }
 
@@ -233,8 +224,6 @@ export class GPUPulseSystem {
         }
 
         this.isStarted = true;
-
-        console.log(`[GPUPulseSystem] Pulse BEGIN: ${context}`);
     }
 
     /**
@@ -244,8 +233,6 @@ export class GPUPulseSystem {
     public registerGameScene(receiver: IGPUPulseReceiver): void {
         this.receiver = receiver;
         this.transferGate.registerReceiver(receiver);
-
-        console.log(`[GPUPulseSystem] Game scene registered: ${receiver.id}`);
     }
 
     /**
@@ -256,7 +243,6 @@ export class GPUPulseSystem {
      */
     public transferToGame(conditions: PulseTransferConditions): boolean {
         if (!this.receiver) {
-            console.error('[GPUPulseSystem] Cannot transfer: no game scene registered');
             return false;
         }
 
@@ -268,15 +254,9 @@ export class GPUPulseSystem {
             rafStable: this.rafHealthTracker.isStableForTransfer(),
         };
 
-        // Log RAF status for debugging
-        console.log(`[GPUPulseSystem] Transfer attempt - RAF status: ${rafMetrics.status}, ` +
-            `avg=${rafMetrics.averageFrameInterval.toFixed(1)}ms, ` +
-            `healthy=${augmentedConditions.rafHealthy}, stable=${augmentedConditions.rafStable}`);
-
         // Block transfer if RAF is throttled
         if (rafMetrics.status === RAFHealthStatus.THROTTLED ||
             rafMetrics.status === RAFHealthStatus.SEVERE_THROTTLED) {
-            console.warn('[GPUPulseSystem] Transfer BLOCKED: RAF is throttled - waiting for recovery');
             return false;
         }
 
@@ -289,7 +269,6 @@ export class GPUPulseSystem {
             // CRITICAL CHANGE: Activate safety net instead of deactivating Host
             // Host stays active as backup until Game Scene proves stable
             this.activateSafetyNet();
-            console.log('[GPUPulseSystem] Transfer initiated - safety net ACTIVE');
         }
 
         return success;
@@ -303,7 +282,6 @@ export class GPUPulseSystem {
         this.safetyNetStartTime = performance.now();
         this.safetyNetStableFrames = 0;
         // Host stays active - do NOT deactivate
-        console.log(`[GPUPulseSystem] Safety net activated - Host remains active for ${this.safetyNetTimeoutMs}ms max`);
     }
 
     /**
@@ -323,7 +301,6 @@ export class GPUPulseSystem {
 
         // Check if Game Scene has maintained stability
         if (rafMetrics.consecutiveHealthyFrames >= this.safetyNetStabilityFrames) {
-            console.log(`[GPUPulseSystem] Game Scene STABLE (${rafMetrics.consecutiveHealthyFrames} frames) - deactivating safety net`);
             this.deactivateSafetyNet();
             return;
         }
@@ -331,7 +308,6 @@ export class GPUPulseSystem {
         // Check timeout
         const elapsed = performance.now() - this.safetyNetStartTime;
         if (elapsed >= this.safetyNetTimeoutMs) {
-            console.warn(`[GPUPulseSystem] Safety net TIMEOUT (${elapsed.toFixed(0)}ms) - forcing deactivation`);
             this.deactivateSafetyNet();
         }
     }
@@ -343,7 +319,6 @@ export class GPUPulseSystem {
         this.safetyNetActive = false;
         if (this.transferGate.getCurrentOwner() === PulseOwner.GAME_SCENE) {
             this.renderHost.deactivate();
-            console.log('[GPUPulseSystem] Safety net deactivated - Host stopped');
         }
     }
 
@@ -353,8 +328,6 @@ export class GPUPulseSystem {
     public reclaimToHost(): void {
         this.transferGate.forceTransfer(PulseOwner.LOADING_HOST);
         this.renderHost.activate();
-
-        console.log('[GPUPulseSystem] Pulse RECLAIMED to Loading Host');
     }
 
     /**
@@ -373,8 +346,6 @@ export class GPUPulseSystem {
         }
 
         this.isStarted = false;
-
-        console.log('[GPUPulseSystem] Pulse END');
     }
 
     /**
@@ -442,8 +413,6 @@ export class GPUPulseSystem {
         this.renderHost.dispose();
 
         this.disposed = true;
-
-        console.log('[GPUPulseSystem] Disposed');
     }
 
     // ============================================================
@@ -483,8 +452,7 @@ export class GPUPulseSystem {
         });
 
         // Connect ownership change callback
-        this.transferGate.setOwnershipCallback((from, to, frameNumber) => {
-            console.log(`[GPUPulseSystem] Ownership: ${from} -> ${to} at frame ${frameNumber}`);
+        this.transferGate.setOwnershipCallback((from, to, _frameNumber) => {
             // Reset RAF tracker on ownership change
             if (from !== to) {
                 this.rafHealthTracker.reset();
