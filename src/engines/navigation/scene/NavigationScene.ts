@@ -458,6 +458,18 @@ export class NavigationScene {
             const result = await this.orchestrator.execute({
                 units, // Pass units here, not via registerUnits()
                 onLog: hooks?.onLog,
+                // Forensic logging: identify 188ms blocking source (Phase 2.7)
+                onUnitStart: (unitId, displayName, phase) => {
+                    performance.mark(`unit-start-${unitId}`);
+                    hooks?.onLog?.(`[UNIT_START] ${displayName} (${phase})`);
+                },
+                onUnitEnd: (unitId, success, elapsedMs) => {
+                    performance.mark(`unit-end-${unitId}`);
+                    const statusIcon = success ? '✓' : '✗';
+                    const blockingFlag = elapsedMs > 50 ? ' ⚠️ BLOCKING' : '';
+                    console.log(`[UNIT_END] ${statusIcon} ${unitId}: ${elapsedMs.toFixed(1)}ms${blockingFlag}`);
+                    hooks?.onLog?.(`[UNIT_END] ${statusIcon} ${unitId}: ${elapsedMs.toFixed(1)}ms${blockingFlag}`);
+                },
                 onReady: () => {
                     // VISUAL_READY/STABILIZING complete — orchestrator logical load done.
                     // ⚠️ This is NOT our READY. ENGINE_AWAKENED barrier comes next.
