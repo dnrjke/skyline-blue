@@ -357,6 +357,18 @@ export class NavigationScene {
             // Begin GPU Pulse - Loading Host now owns the pulse
             this.gpuPulseSystem.beginPulse('navigation-loading');
 
+            // ===== RAF WARM-UP GATE =====
+            // CRITICAL: Wait for RAF to stabilize BEFORE any heavy work.
+            // This prevents the 191ms main thread blocking from causing
+            // Chromium to classify the app as "idle" and throttle RAF.
+            hooks?.onLog?.('[WARMUP] Waiting for RAF stabilization...');
+            const warmupResult = await this.gpuPulseSystem.waitForWarmup();
+            if (warmupResult.success) {
+                hooks?.onLog?.(`[WARMUP] Gate OPEN (${warmupResult.stableFramesAchieved} stable frames, ${warmupResult.avgFrameIntervalMs.toFixed(1)}ms avg)`);
+            } else {
+                hooks?.onLog?.(`[WARMUP] Timeout (proceeding anyway)`);
+            }
+
             // Create orchestrator
             this.orchestrator = new ArcanaLoadingOrchestrator(this.scene, {
                 enableCompressionAnimation: true,
@@ -446,6 +458,18 @@ export class NavigationScene {
             const result = await this.orchestrator.execute({
                 units, // Pass units here, not via registerUnits()
                 onLog: hooks?.onLog,
+                // Forensic logging: identify 188ms blocking source (Phase 2.7)
+                onUnitStart: (unitId, displayName, phase) => {
+                    performance.mark(`unit-start-${unitId}`);
+                    hooks?.onLog?.(`[UNIT_START] ${displayName} (${phase})`);
+                },
+                onUnitEnd: (unitId, success, elapsedMs) => {
+                    performance.mark(`unit-end-${unitId}`);
+                    const statusIcon = success ? '✓' : '✗';
+                    const blockingFlag = elapsedMs > 50 ? ' ⚠️ BLOCKING' : '';
+                    console.log(`[UNIT_END] ${statusIcon} ${unitId}: ${elapsedMs.toFixed(1)}ms${blockingFlag}`);
+                    hooks?.onLog?.(`[UNIT_END] ${statusIcon} ${unitId}: ${elapsedMs.toFixed(1)}ms${blockingFlag}`);
+                },
                 onReady: () => {
                     // VISUAL_READY/STABILIZING complete — orchestrator logical load done.
                     // ⚠️ This is NOT our READY. ENGINE_AWAKENED barrier comes next.
