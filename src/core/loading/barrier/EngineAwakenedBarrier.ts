@@ -32,6 +32,7 @@
 
 import * as BABYLON from '@babylonjs/core';
 import { RAFHealthStatus, getGlobalRAFHealthGuard } from '../executor/RAFHealthGuard';
+import { ThrottleBreaker, createThrottleBreaker } from './ThrottleBreaker';
 
 // Re-export for backward compatibility
 export { RAFHealthStatus };
@@ -66,6 +67,12 @@ export interface ProgressiveStabilizationConfig {
 
     /** Maximum stdDev for throttle-stable detection (default: 5ms) */
     throttleStdDevThreshold?: number;
+
+    /** Enable active throttle breaking (default: true) */
+    enableThrottleBreaker?: boolean;
+
+    /** Maximum throttle breaker attempts (default: 3) */
+    throttleBreakerMaxAttempts?: number;
 }
 
 /**
@@ -171,14 +178,21 @@ class ThrottleLockDetector {
  * EngineAwakenedBarrier - Progressive Stabilization Implementation
  *
  * NO BURST RENDERING. Passive observation only.
+ * When throttle is detected, uses ThrottleBreaker to actively recover.
  */
 export class EngineAwakenedBarrier {
     private scene: BABYLON.Scene;
-    private config: Required<ProgressiveStabilizationConfig>;
+    private engine: BABYLON.Engine;
+    private config: Required<ProgressiveStabilizationConfig> & {
+        enableThrottleBreaker: boolean;
+        throttleBreakerMaxAttempts: number;
+    };
     private disposed: boolean = false;
+    private throttleBreaker: ThrottleBreaker | null = null;
 
     constructor(scene: BABYLON.Scene, config: ProgressiveStabilizationConfig = {}) {
         this.scene = scene;
+        this.engine = scene.getEngine() as BABYLON.Engine;
         this.config = {
             minStableFrames: config.minStableFrames ?? 10,
             stableThresholdMs: config.stableThresholdMs ?? 25,
@@ -189,6 +203,8 @@ export class EngineAwakenedBarrier {
             throttleDetectionWindow: config.throttleDetectionWindow ?? 10,
             throttleIntervalRange: config.throttleIntervalRange ?? [95, 115],
             throttleStdDevThreshold: config.throttleStdDevThreshold ?? 5,
+            enableThrottleBreaker: config.enableThrottleBreaker ?? true,
+            throttleBreakerMaxAttempts: config.throttleBreakerMaxAttempts ?? 3,
         };
     }
 
@@ -343,14 +359,58 @@ export class EngineAwakenedBarrier {
                     };
                     currentHealth = RAFHealthStatus.LOCKED;
 
-                    // Throttle-stable is acceptable - pass
                     if (this.config.debug) {
-                        console.log(
-                            `[ENGINE_AWAKENED] Throttle-stable detected: ` +
+                        console.warn(
+                            `[ENGINE_AWAKENED] ⚠️ Throttle-stable detected: ` +
                             `~${throttleResult.intervalMs.toFixed(1)}ms interval ` +
-                            `(stdDev=${throttleResult.stdDevMs.toFixed(2)}ms)`
+                            `(stdDev=${throttleResult.stdDevMs.toFixed(2)}ms) - attempting recovery...`
                         );
                     }
+
+                    // Phase 2.7: Try to break the throttle instead of accepting it
+                    if (this.config.enableThrottleBreaker) {
+                        // Temporarily stop observer while we break throttle
+                        if (observer) {
+                            this.scene.onBeforeRenderObservable.remove(observer);
+                            observer = null;
+                        }
+
+                        // Create throttle breaker and attempt recovery
+                        this.throttleBreaker = createThrottleBreaker(
+                            this.engine,
+                            this.scene,
+                            {
+                                maxAttempts: this.config.throttleBreakerMaxAttempts,
+                                targetIntervalMs: this.config.stableThresholdMs,
+                                debug: this.config.debug,
+                            }
+                        );
+
+                        this.throttleBreaker.breakThrottle().then((breakResult) => {
+                            if (resolved) return;
+
+                            if (breakResult.success) {
+                                if (this.config.debug) {
+                                    console.log(
+                                        `[ENGINE_AWAKENED] ✓ Throttle broken! ` +
+                                        `Final interval: ${breakResult.finalIntervalMs.toFixed(1)}ms`
+                                    );
+                                }
+                                // Throttle broken - now wait for stable frames
+                                this.waitForPostBreakStability(startTime, throttleResult).then(resolve);
+                            } else {
+                                // Failed to break throttle - pass with warning
+                                console.warn(
+                                    `[ENGINE_AWAKENED] ⚠️ Could not break throttle after ` +
+                                    `${breakResult.attempts} attempts. Proceeding with throttled state.`
+                                );
+                                complete(true, false, true);
+                            }
+                        });
+                        return;
+                    }
+
+                    // Throttle breaker disabled - pass immediately (legacy behavior)
                     complete(true, false, true);
                     return;
                 }
@@ -416,6 +476,124 @@ export class EngineAwakenedBarrier {
     }
 
     /**
+     * Wait for stable frames after throttle is broken.
+     *
+     * This is called after ThrottleBreaker successfully breaks the throttle.
+     * We need to verify that RAF is now running at normal cadence.
+     */
+    private waitForPostBreakStability(
+        originalStartTime: number,
+        throttleResult: { intervalMs: number; stdDevMs: number } | null
+    ): Promise<ProgressiveStabilizationResult> {
+        return new Promise((resolve) => {
+            if (this.disposed) {
+                resolve(this.createFailResult('disposed'));
+                return;
+            }
+
+            let frameCount = 0;
+            let consecutiveStableFrames = 0;
+            let lastFrameTime = performance.now();
+            const stableDeltas: number[] = [];
+            let maxDelta = 0;
+            let observer: BABYLON.Nullable<BABYLON.Observer<BABYLON.Scene>> = null;
+            let resolved = false;
+            const requiredFrames = this.config.minStableFrames;
+
+            if (this.config.debug) {
+                console.log(
+                    `[ENGINE_AWAKENED] Post-break stability check: ` +
+                    `waiting for ${requiredFrames} stable frames...`
+                );
+            }
+
+            const complete = (success: boolean) => {
+                if (resolved) return;
+                resolved = true;
+
+                if (observer) {
+                    this.scene.onBeforeRenderObservable.remove(observer);
+                    observer = null;
+                }
+
+                const elapsedMs = performance.now() - originalStartTime;
+                const avgDelta = stableDeltas.length > 0
+                    ? stableDeltas.reduce((a, b) => a + b, 0) / stableDeltas.length
+                    : (throttleResult?.intervalMs ?? 0);
+
+                const result: ProgressiveStabilizationResult = {
+                    passed: success,
+                    framesObserved: frameCount,
+                    stableFrameCount: consecutiveStableFrames,
+                    elapsedMs,
+                    avgDeltaMs: avgDelta,
+                    maxDeltaMs: maxDelta,
+                    healthStatus: success ? RAFHealthStatus.HEALTHY : RAFHealthStatus.LOCKED,
+                    graceful: false,
+                    throttleStable: !success,
+                    throttleIntervalMs: success ? undefined : throttleResult?.intervalMs,
+                };
+
+                this.logResult(result);
+                resolve(result);
+            };
+
+            // Timeout - if we can't get stable frames in 2 seconds, give up
+            const timeoutId = setTimeout(() => {
+                if (!resolved) {
+                    if (this.config.debug) {
+                        console.warn(
+                            `[ENGINE_AWAKENED] Post-break stability timeout. ` +
+                            `Got ${consecutiveStableFrames}/${requiredFrames} stable frames.`
+                        );
+                    }
+                    complete(consecutiveStableFrames >= requiredFrames / 2);
+                }
+            }, 2000);
+
+            observer = this.scene.onBeforeRenderObservable.add(() => {
+                if (resolved) return;
+
+                const now = performance.now();
+                const delta = now - lastFrameTime;
+                lastFrameTime = now;
+                frameCount++;
+
+                // Skip first frame
+                if (frameCount === 1) return;
+
+                maxDelta = Math.max(maxDelta, delta);
+
+                if (delta < this.config.stableThresholdMs) {
+                    consecutiveStableFrames++;
+                    stableDeltas.push(delta);
+
+                    if (this.config.debug) {
+                        console.log(
+                            `[ENGINE_AWAKENED] Post-break frame ${frameCount}: ` +
+                            `dt=${delta.toFixed(1)}ms ✓ (${consecutiveStableFrames}/${requiredFrames})`
+                        );
+                    }
+
+                    if (consecutiveStableFrames >= requiredFrames) {
+                        clearTimeout(timeoutId);
+                        complete(true);
+                    }
+                } else if (delta >= this.config.spikeThresholdMs) {
+                    // Still seeing spikes - throttle break may have failed
+                    if (this.config.debug) {
+                        console.warn(
+                            `[ENGINE_AWAKENED] Post-break spike: ` +
+                            `dt=${delta.toFixed(1)}ms - resetting counter`
+                        );
+                    }
+                    consecutiveStableFrames = 0;
+                }
+            });
+        });
+    }
+
+    /**
      * Log stabilization result.
      */
     private logResult(result: ProgressiveStabilizationResult): void {
@@ -472,6 +650,10 @@ export class EngineAwakenedBarrier {
 
     dispose(): void {
         this.disposed = true;
+        if (this.throttleBreaker) {
+            this.throttleBreaker.dispose();
+            this.throttleBreaker = null;
+        }
     }
 }
 

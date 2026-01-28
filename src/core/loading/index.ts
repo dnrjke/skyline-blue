@@ -83,6 +83,10 @@ export type { BarrierValidation, BarrierEvidence, BarrierRequirement } from './b
 export { EngineAwakenedBarrier, waitForEngineAwakened } from './barrier/EngineAwakenedBarrier';
 export type { EngineAwakenedConfig, EngineAwakenedResult } from './barrier/EngineAwakenedBarrier';
 
+// Throttle Breaker (Active throttle recovery)
+export { ThrottleBreaker, createThrottleBreaker } from './barrier/ThrottleBreaker';
+export type { ThrottleBreakerConfig, ThrottleBreakerResult } from './barrier/ThrottleBreaker';
+
 // ========================================
 // Legacy: BaseSceneLoader (호환성 유지)
 // ========================================
