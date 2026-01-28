@@ -691,7 +691,8 @@ export class NavigationScene {
 
                 // Validate RenderDesyncProbe acceptance criteria (BLOCKING)
                 // If probe FAILS → READY is revoked, treated as loading failure
-                if (this.renderDesyncProbe) {
+                // Skip validation in minimal debug mode
+                if (this.renderDesyncProbe && !debugConfig.minimal && !debugConfig.noBarrier && !debugConfig.noVisualReady) {
                     const probeResult = validateAcceptanceCriteria(this.renderDesyncProbe);
                     if (!probeResult.passed) {
                         console.error(
@@ -704,6 +705,9 @@ export class NavigationScene {
                         );
                     }
                     console.log('[READY] ✓ RenderDesyncProbe acceptance PASSED');
+                } else if (debugConfig.minimal || debugConfig.noBarrier || debugConfig.noVisualReady) {
+                    blackHoleDebugLog('⚠️ RenderDesyncProbe validation SKIPPED by debug flag');
+                    console.log('[READY] ⚠️ RenderDesyncProbe validation SKIPPED (debug mode)');
                 }
 
                 // Wait for camera transition to complete (grid fully visible)
