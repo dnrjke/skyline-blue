@@ -11,6 +11,7 @@
 import * as BABYLON from '@babylonjs/core';
 import { RAFMeter, RAFMeterResult } from './RAFMeter';
 import { TacticalHologram } from '../../engines/navigation/visualization/TacticalHologram';
+import { createPulseRenderHost } from '../../core/gpu-pulse/PulseRenderHost';
 
 export interface PhaseRunnerConfig {
     /** Enable debug logging */
@@ -697,15 +698,116 @@ export class PhaseRunner {
         // Note: In real game, old scene is NOT disposed immediately
         // but we're testing if scene switch causes throttle
 
-        // Update internal reference for subsequent phases
-        this.scene = newScene;
+        // DON'T update this.scene - we need to restore to original for LabUI
+        // this.scene = newScene;  // REMOVED - causes UI to disappear
+
+        await this.waitFramesOnScene(newScene, 10);
+
+        stopMonitor();
+
+        // Measure RAF after (on new scene)
+        const rafAfter = await this.rafMeter.measure(newScene, 20);
+
+        // Step 6: RESTORE original scene for subsequent phases
+        this.log(`[${phaseName}] Step 6: Restoring original scene for LabUI...`);
+        engine.stopRenderLoop();
+        newScene.dispose();
+        engine.runRenderLoop(() => {
+            oldScene.render();
+        });
+
+        // Wait for original scene to be back
+        await this.waitFrames(5);
+        this.log(`[${phaseName}] Original scene restored`);
+
+        return {
+            phaseName,
+            rafBefore,
+            rafAfter,
+            throttleDetected,
+            throttleDetectedAtMs,
+            maxBlockingMs,
+            elapsedMs: performance.now() - startTime,
+            error: null,
+        };
+    }
+
+    /**
+     * Run GPU Pulse Host phase
+     * Tests PulseRenderHost burst rendering (like Loading Host during loading)
+     */
+    async runGPUPulseHostPhase(): Promise<PhaseResult> {
+        const phaseName = 'GPU Pulse Host';
+        const startTime = performance.now();
+
+        this.log(`[${phaseName}] Starting...`);
+        this.log(`[${phaseName}] Simulating PulseRenderHost burst rendering during loading...`);
+
+        // Measure RAF before
+        const rafBefore = await this.rafMeter.measure(this.scene, 20);
+
+        // Track throttle
+        let throttleDetected = false;
+        let throttleDetectedAtMs: number | null = null;
+        let maxBlockingMs = 0;
+
+        const stopMonitor = this.rafMeter.measureContinuous(
+            this.scene,
+            (interval, stats) => {
+                if (interval > maxBlockingMs) {
+                    maxBlockingMs = interval;
+                }
+                if (stats.isThrottled && !throttleDetected) {
+                    throttleDetected = true;
+                    throttleDetectedAtMs = performance.now() - startTime;
+                    this.log(`[${phaseName}] ⚠️ THROTTLE DETECTED at ${throttleDetectedAtMs.toFixed(0)}ms`);
+                }
+            },
+            5
+        );
+
+        // Step 1: Create PulseRenderHost (exactly like real loading)
+        this.log(`[${phaseName}] Step 1: Creating PulseRenderHost...`);
+        const pulseHost = createPulseRenderHost(this.scene, true); // debug=true for visibility
+
+        // Step 2: Activate pulse rendering
+        this.log(`[${phaseName}] Step 2: Activating pulse host...`);
+        pulseHost.activate();
+
+        // Step 3: Simulate loading by calling renderPulseFrame repeatedly
+        // This is what happens during actual loading
+        this.log(`[${phaseName}] Step 3: Running pulse frames (simulating loading)...`);
+        const pulseFrameCount = 60; // ~1 second of pulse rendering
+        let pulseFramesRendered = 0;
+
+        for (let i = 0; i < pulseFrameCount; i++) {
+            pulseHost.renderPulseFrame();
+            pulseFramesRendered++;
+
+            // Wait one frame between pulse calls
+            await this.waitFrames(1);
+
+            // Log progress every 20 frames
+            if (i > 0 && i % 20 === 0) {
+                this.log(`[${phaseName}] Pulse frames: ${i}/${pulseFrameCount}`);
+            }
+        }
+
+        this.log(`[${phaseName}] Rendered ${pulseFramesRendered} pulse frames`);
+
+        // Step 4: Deactivate pulse host (like when loading completes)
+        this.log(`[${phaseName}] Step 4: Deactivating pulse host...`);
+        pulseHost.deactivate();
 
         await this.waitFrames(10);
+
+        // Step 5: Dispose pulse host
+        pulseHost.dispose();
 
         stopMonitor();
 
         // Measure RAF after
-        const rafAfter = await this.rafMeter.measure(newScene, 20);
+        const rafAfter = await this.rafMeter.measure(this.scene, 20);
 
         return {
             phaseName,

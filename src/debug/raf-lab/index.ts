@@ -185,43 +185,49 @@ export class RAFLab {
         this.results.push(warmupResult);
         this.logPhaseResult(warmupResult);
 
-        // Phase 3: TacticalGrid Creation (NEW - suspected throttle trigger)
+        // Phase 3: GPU Pulse Host (Loading Host burst rendering)
+        this.labUI?.setPhase('GPU Pulse Host');
+        const pulseHostResult = await this.phaseRunner.runGPUPulseHostPhase();
+        this.results.push(pulseHostResult);
+        this.logPhaseResult(pulseHostResult);
+
+        // Phase 4: TacticalGrid Creation (suspected throttle trigger)
         this.labUI?.setPhase('TacticalGrid Creation');
         const tacticalGridResult = await this.phaseRunner.runTacticalGridPhase();
         this.results.push(tacticalGridResult);
         this.logPhaseResult(tacticalGridResult);
 
-        // Phase 4: Visual Ready Check (NavigationScene's activeMeshes check)
+        // Phase 5: Visual Ready Check (NavigationScene's activeMeshes check)
         this.labUI?.setPhase('Visual Ready Check');
         const visualReadyResult = await this.phaseRunner.runVisualReadyPhase();
         this.results.push(visualReadyResult);
         this.logPhaseResult(visualReadyResult);
 
-        // Phase 5: Scene Transition (Host → Navigation scene switch)
+        // Phase 6: Scene Transition (Host → Navigation scene switch)
         this.labUI?.setPhase('Scene Transition');
         const sceneTransitionResult = await this.phaseRunner.runSceneTransitionPhase();
         this.results.push(sceneTransitionResult);
         this.logPhaseResult(sceneTransitionResult);
 
-        // Phase 6: Engine Resize (finalizeNavigationReady simulation)
+        // Phase 7: Engine Resize (finalizeNavigationReady simulation)
         this.labUI?.setPhase('Engine Resize');
         const resizeResult = await this.phaseRunner.runEngineResizePhase();
         this.results.push(resizeResult);
         this.logPhaseResult(resizeResult);
 
-        // Phase 7: Visibility Animation (camera transition 0→1)
+        // Phase 8: Visibility Animation (camera transition 0→1)
         this.labUI?.setPhase('Visibility Animation');
         const visibilityResult = await this.phaseRunner.runVisibilityAnimationPhase();
         this.results.push(visibilityResult);
         this.logPhaseResult(visibilityResult);
 
-        // Phase 8: Stabilization
+        // Phase 9: Stabilization
         this.labUI?.setPhase('Stabilization');
         const stabilizeResult = await this.phaseRunner.runStabilizationPhase();
         this.results.push(stabilizeResult);
         this.logPhaseResult(stabilizeResult);
 
-        // Phase 9: Transfer simulation
+        // Phase 10: Transfer simulation
         this.labUI?.setPhase('Transfer');
         const transferResult = await this.phaseRunner.runTransferPhase();
         this.results.push(transferResult);
