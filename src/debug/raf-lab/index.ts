@@ -185,13 +185,25 @@ export class RAFLab {
         this.results.push(warmupResult);
         this.logPhaseResult(warmupResult);
 
-        // Phase 3: Stabilization
+        // Phase 3: TacticalGrid Creation (NEW - suspected throttle trigger)
+        this.labUI?.setPhase('TacticalGrid Creation');
+        const tacticalGridResult = await this.phaseRunner.runTacticalGridPhase();
+        this.results.push(tacticalGridResult);
+        this.logPhaseResult(tacticalGridResult);
+
+        // Phase 4: Visual Ready Check (NEW - NavigationScene's activeMeshes check)
+        this.labUI?.setPhase('Visual Ready Check');
+        const visualReadyResult = await this.phaseRunner.runVisualReadyPhase();
+        this.results.push(visualReadyResult);
+        this.logPhaseResult(visualReadyResult);
+
+        // Phase 5: Stabilization
         this.labUI?.setPhase('Stabilization');
         const stabilizeResult = await this.phaseRunner.runStabilizationPhase();
         this.results.push(stabilizeResult);
         this.logPhaseResult(stabilizeResult);
 
-        // Phase 4: Transfer simulation
+        // Phase 6: Transfer simulation
         this.labUI?.setPhase('Transfer');
         const transferResult = await this.phaseRunner.runTransferPhase();
         this.results.push(transferResult);
