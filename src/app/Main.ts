@@ -20,6 +20,10 @@ import * as BABYLON from '@babylonjs/core';
 
 /** DEV 모드 플래그 */
 const IS_DEV = typeof import.meta !== 'undefined' && (import.meta as any).env?.DEV === true;
+
+// RAF Lab - Isolated debugging tool for RAF throttle issues
+// Usage: Add ?raf-lab to URL
+import { checkAndLaunchRAFLab } from '../debug/raf-lab/launcher';
 import { GUIManager } from '../shared/ui/GUIManager';
 import { BackgroundLayer } from '../shared/ui/BackgroundLayer';
 import { CharacterLayer } from '../shared/ui/CharacterLayer';
@@ -227,6 +231,15 @@ class Main {
 }
 
 // Initialize on DOM ready
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
+    // Check for RAF Lab mode first
+    const canvas = document.getElementById('renderCanvas') as HTMLCanvasElement;
+    if (canvas && await checkAndLaunchRAFLab(canvas)) {
+        // RAF Lab is running, skip normal game initialization
+        console.log('[System] RAF Lab mode active - Normal game flow bypassed');
+        return;
+    }
+
+    // Normal game initialization
     new Main();
 });
