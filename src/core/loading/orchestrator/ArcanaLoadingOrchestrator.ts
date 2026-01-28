@@ -27,6 +27,7 @@ import { LoadingPhase } from '../protocol/LoadingPhase';
 import { ArcanaProgressModel, UnitWeightConfig } from '../progress/ArcanaProgressModel';
 import { LoadingStateEmitter, LoadingState, LoadingEvents } from '../progress/LoadingStateEmitter';
 import { BarrierValidation } from '../barrier/RenderReadyBarrier';
+import type { SlicedLoadUnit } from '../executor/SlicedLoadUnit';
 
 /**
  * Orchestrator configuration
@@ -74,8 +75,9 @@ export interface OrchestratorExecuteOptions extends OrchestratorCallbacks {
     /**
      * LoadUnits to execute.
      * This is the ONLY way to register units - external registerUnits() is deprecated.
+     * Supports both legacy LoadUnit and new SlicedLoadUnit (Pure Generator Manifesto).
      */
-    units: LoadUnit[];
+    units: (LoadUnit | SlicedLoadUnit)[];
 }
 
 /**
@@ -192,7 +194,7 @@ export class ArcanaLoadingOrchestrator {
      * Internal method to register units.
      * Called only from execute() to ensure single registration point.
      */
-    private internalRegisterUnits(units: LoadUnit[]): void {
+    private internalRegisterUnits(units: (LoadUnit | SlicedLoadUnit)[]): void {
         this.registry.registerAll(units);
 
         // Build weight config for progress model
@@ -208,7 +210,7 @@ export class ArcanaLoadingOrchestrator {
     /**
      * Calculate unit weight based on phase
      */
-    private getUnitWeight(unit: LoadUnit): number {
+    private getUnitWeight(unit: LoadUnit | SlicedLoadUnit): number {
         // Heavier phases get more weight
         switch (unit.phase) {
             case LoadingPhase.FETCHING:

@@ -144,8 +144,6 @@ export class LoadExecutionContext {
         if (forced) {
             this.forcedYieldCount++;
         }
-
-        this.lastYieldTime = performance.now();
     }
 
     /**
@@ -235,7 +233,6 @@ export class LoadExecutionContext {
         this.recoveryFrameCount = 0;
         this.forcedYieldCount = 0;
         this.maxBlockingTime = 0;
-        this.lastYieldTime = 0;
         this.paused = false;
         this.pauseReason = null;
     }

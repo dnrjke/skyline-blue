@@ -49,7 +49,7 @@
 
 import * as BABYLON from '@babylonjs/core';
 import { LoadUnit, LoadUnitStatus } from './LoadUnit';
-import { LoadingRegistry } from './LoadingRegistry';
+import { LoadingRegistry, type AnyLoadUnit } from './LoadingRegistry';
 import { LoadingPhase } from '../protocol/LoadingPhase';
 import { RenderReadyBarrier, BarrierValidation } from '../barrier/RenderReadyBarrier';
 import { STABILIZATION_SETTINGS } from '../progress/ArcanaProgressModel';
@@ -120,7 +120,7 @@ export interface ProtocolResult {
     phaseTimes: Map<LoadingPhase, number>;
 
     /** 실패한 Unit (있는 경우) */
-    failedUnits: LoadUnit[];
+    failedUnits: AnyLoadUnit[];
 
     /** 첫 에러 */
     error?: Error;
@@ -299,7 +299,7 @@ export class LoadingProtocol {
      * - SlicedLoadUnit인 경우 → Executor.run() (자동 Time-Slicing)
      * - 아닌 경우 → 경고 + 레거시 unit.load() (마이그레이션 유도)
      */
-    private async executeUnits(units: LoadUnit[], options: ProtocolOptions): Promise<void> {
+    private async executeUnits(units: AnyLoadUnit[], options: ProtocolOptions): Promise<void> {
         const requiredUnits = units.filter((u) => u.requiredForReady);
         const optionalUnits = units.filter((u) => !u.requiredForReady);
 
@@ -377,9 +377,9 @@ export class LoadingProtocol {
                         if (isSlicedLoadUnit(unit)) {
                             await this.executeSlicedUnit(unit as SlicedLoadUnit, options);
                         } else {
-                            await unit.load(this.scene);
+                            await (unit as LoadUnit).load(this.scene);
                         }
-                        options.onUnitStatusChange?.(unit, unit.status);
+                        options.onUnitStatusChange?.(unit as unknown as LoadUnit, unit.status);
                     } catch (err) {
                         console.warn(`[LoadingProtocol] Optional unit ${unit.id} failed:`, err);
                         unit.status = LoadUnitStatus.SKIPPED;
@@ -451,12 +451,27 @@ export class LoadingProtocol {
                 this.checkCancelled();
                 options.onLog?.(`[BARRIER] Executing: ${unit.id}...`);
 
-                await unit.load(this.scene, (_unitProgress) => {
-                    const overallProgress = this.registry.calculateProgress();
-                    options.onProgress?.(overallProgress);
-                });
+                // [Pure Generator Manifesto] SlicedLoadUnit 체크
+                if (isSlicedLoadUnit(unit)) {
+                    // ✅ SlicedLoadUnit: Executor로 실행
+                    const result = await this.executeSlicedUnit(unit as SlicedLoadUnit, options);
 
-                options.onUnitStatusChange?.(unit, unit.status);
+                    if (result.designFailure) {
+                        this.designFailureUnits.push(unit.id);
+                    }
+
+                    if (!result.success) {
+                        throw unit.error || new Error(`Barrier unit ${unit.id} failed`);
+                    }
+                } else {
+                    // ⚠️ Legacy LoadUnit: 기존 방식
+                    await (unit as LoadUnit).load(this.scene, (_unitProgress) => {
+                        const overallProgress = this.registry.calculateProgress();
+                        options.onProgress?.(overallProgress);
+                    });
+                }
+
+                options.onUnitStatusChange?.(unit as unknown as LoadUnit, unit.status);
 
                 if (unit.status === LoadUnitStatus.FAILED) {
                     throw unit.error || new Error(`Barrier unit ${unit.id} failed`);
@@ -546,12 +561,23 @@ export class LoadingProtocol {
             this.checkCancelled();
             options.onLog?.(`[VISUAL_READY] Verifying: ${unit.id}...`);
 
-            await unit.load(this.scene, (_unitProgress) => {
-                const overallProgress = this.registry.calculateProgress();
-                options.onProgress?.(Math.min(0.95, overallProgress));
-            });
+            // [Pure Generator Manifesto] SlicedLoadUnit 체크
+            if (isSlicedLoadUnit(unit)) {
+                // ✅ SlicedLoadUnit: Executor로 실행
+                const result = await this.executeSlicedUnit(unit as SlicedLoadUnit, options);
 
-            options.onUnitStatusChange?.(unit, unit.status);
+                if (result.designFailure) {
+                    this.designFailureUnits.push(unit.id);
+                }
+            } else {
+                // ⚠️ Legacy LoadUnit: 기존 방식
+                await (unit as LoadUnit).load(this.scene, (_unitProgress: { progress: number }) => {
+                    const overallProgress = this.registry.calculateProgress();
+                    options.onProgress?.(Math.min(0.95, overallProgress));
+                });
+            }
+
+            options.onUnitStatusChange?.(unit as unknown as LoadUnit, unit.status);
 
             if (unit.requiredForReady && unit.status === LoadUnitStatus.FAILED) {
                 throw unit.error || new Error(`Visual verification failed: ${unit.id}`);

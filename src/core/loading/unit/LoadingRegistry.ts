@@ -13,13 +13,19 @@
 
 import { LoadUnit, LoadUnitStatus } from './LoadUnit';
 import { LoadingPhase, PHASE_ORDER } from '../protocol/LoadingPhase';
+import type { SlicedLoadUnit } from '../executor/SlicedLoadUnit';
+
+/**
+ * LoadUnit 또는 SlicedLoadUnit (Pure Generator Manifesto)
+ */
+export type AnyLoadUnit = LoadUnit | SlicedLoadUnit;
 
 /**
  * Registry 이벤트 콜백
  */
 export interface RegistryCallbacks {
-    onUnitStatusChange?: (unit: LoadUnit, oldStatus: LoadUnitStatus, newStatus: LoadUnitStatus) => void;
-    onPhaseComplete?: (phase: LoadingPhase, units: LoadUnit[]) => void;
+    onUnitStatusChange?: (unit: AnyLoadUnit, oldStatus: LoadUnitStatus, newStatus: LoadUnitStatus) => void;
+    onPhaseComplete?: (phase: LoadingPhase, units: AnyLoadUnit[]) => void;
 }
 
 /**
@@ -28,8 +34,8 @@ export interface RegistryCallbacks {
 export interface RegistrySnapshot {
     totalUnits: number;
     requiredUnits: number;
-    byPhase: Map<LoadingPhase, LoadUnit[]>;
-    byStatus: Map<LoadUnitStatus, LoadUnit[]>;
+    byPhase: Map<LoadingPhase, AnyLoadUnit[]>;
+    byStatus: Map<LoadUnitStatus, AnyLoadUnit[]>;
     progress: number; // 0~1
 }
 
@@ -37,16 +43,16 @@ export interface RegistrySnapshot {
  * LoadingRegistry
  */
 export class LoadingRegistry {
-    private units: Map<string, LoadUnit> = new Map();
+    private units: Map<string, AnyLoadUnit> = new Map();
     // Reserved for future event notifications
     private _callbacks: RegistryCallbacks = {};
 
     /**
      * LoadUnit 등록
-     * @param unit 등록할 Unit
+     * @param unit 등록할 Unit (LoadUnit 또는 SlicedLoadUnit)
      * @throws 중복 ID 등록 시 에러
      */
-    register(unit: LoadUnit): void {
+    register(unit: AnyLoadUnit): void {
         if (this.units.has(unit.id)) {
             throw new Error(`[LoadingRegistry] Duplicate unit ID: ${unit.id}`);
         }
@@ -59,7 +65,7 @@ export class LoadingRegistry {
     /**
      * 여러 LoadUnit 일괄 등록
      */
-    registerAll(units: LoadUnit[]): void {
+    registerAll(units: AnyLoadUnit[]): void {
         for (const unit of units) {
             this.register(unit);
         }
@@ -91,49 +97,49 @@ export class LoadingRegistry {
     /**
      * ID로 Unit 조회
      */
-    getUnit(unitId: string): LoadUnit | undefined {
+    getUnit(unitId: string): AnyLoadUnit | undefined {
         return this.units.get(unitId);
     }
 
     /**
      * 모든 Unit 조회
      */
-    getAllUnits(): LoadUnit[] {
+    getAllUnits(): AnyLoadUnit[] {
         return Array.from(this.units.values());
     }
 
     /**
      * 특정 Phase의 Unit들 조회
      */
-    getUnitsByPhase(phase: LoadingPhase): LoadUnit[] {
+    getUnitsByPhase(phase: LoadingPhase): AnyLoadUnit[] {
         return this.getAllUnits().filter((u) => u.phase === phase);
     }
 
     /**
      * READY 판정에 필수인 Unit들 조회
      */
-    getRequiredUnits(): LoadUnit[] {
+    getRequiredUnits(): AnyLoadUnit[] {
         return this.getAllUnits().filter((u) => u.requiredForReady);
     }
 
     /**
      * Optional Unit들 조회
      */
-    getOptionalUnits(): LoadUnit[] {
+    getOptionalUnits(): AnyLoadUnit[] {
         return this.getAllUnits().filter((u) => !u.requiredForReady);
     }
 
     /**
      * 특정 상태의 Unit들 조회
      */
-    getUnitsByStatus(status: LoadUnitStatus): LoadUnit[] {
+    getUnitsByStatus(status: LoadUnitStatus): AnyLoadUnit[] {
         return this.getAllUnits().filter((u) => u.status === status);
     }
 
     /**
      * Phase 순서대로 정렬된 Unit 목록
      */
-    getUnitsInPhaseOrder(): LoadUnit[] {
+    getUnitsInPhaseOrder(): AnyLoadUnit[] {
         const phaseIndex = new Map(PHASE_ORDER.map((p, i) => [p, i]));
         return this.getAllUnits().sort((a, b) => {
             const aIdx = phaseIndex.get(a.phase) ?? 999;
@@ -183,8 +189,8 @@ export class LoadingRegistry {
      */
     getSnapshot(): RegistrySnapshot {
         const allUnits = this.getAllUnits();
-        const byPhase = new Map<LoadingPhase, LoadUnit[]>();
-        const byStatus = new Map<LoadUnitStatus, LoadUnit[]>();
+        const byPhase = new Map<LoadingPhase, AnyLoadUnit[]>();
+        const byStatus = new Map<LoadUnitStatus, AnyLoadUnit[]>();
 
         for (const unit of allUnits) {
             // By phase

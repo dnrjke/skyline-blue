@@ -32,6 +32,7 @@ import {
     waitForEngineAwakened,
     RenderingIntentKeeper,
     type LoadUnit,
+    type SlicedLoadUnit,
 } from '../../../core/loading';
 import {
     EnvironmentUnit,
@@ -414,7 +415,7 @@ export class NavigationScene {
                 });
             }
 
-            const units: LoadUnit[] = [
+            const units: (LoadUnit | SlicedLoadUnit)[] = [
                 // FETCHING phase
                 this.environmentUnit,
 

@@ -29,7 +29,7 @@ export type { LoadUnit, LoadUnitProgress, LoadUnitFactory } from './unit/LoadUni
 
 // Registry
 export { LoadingRegistry } from './unit/LoadingRegistry';
-export type { RegistryCallbacks, RegistrySnapshot } from './unit/LoadingRegistry';
+export type { RegistryCallbacks, RegistrySnapshot, AnyLoadUnit } from './unit/LoadingRegistry';
 
 // Protocol
 export { LoadingProtocol } from './unit/LoadingProtocol';

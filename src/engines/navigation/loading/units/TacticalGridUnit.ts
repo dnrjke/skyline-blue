@@ -1,5 +1,9 @@
 /**
- * TacticalGridUnit - 전술 홀로그램 그리드 LoadUnit.
+ * TacticalGridUnit - 전술 홀로그램 그리드 LoadUnit (Pure Generator Version)
+ *
+ * The Pure Generator Manifesto 준수:
+ * - AsyncGenerator로 완전 전환
+ * - while(ctx.isHealthy()) 패턴 적용
  *
  * BUILDING phase에서:
  * - TacticalHologram 활성화
@@ -9,7 +13,12 @@
  */
 
 import * as BABYLON from '@babylonjs/core';
-import { BaseLoadUnit, LoadUnitProgress } from '../../../../core/loading/unit/LoadUnit';
+import {
+    BaseSlicedLoadUnit,
+    type LoadUnitCost,
+} from '../../../../core/loading/executor/SlicedLoadUnit';
+import type { LoadExecutionContext } from '../../../../core/loading/executor/LoadExecutionContext';
+import { LoadUnitProgress } from '../../../../core/loading/unit/LoadUnit';
 import { LoadingPhase } from '../../../../core/loading';
 import { TacticalHologram } from '../../visualization/TacticalHologram';
 
@@ -20,10 +29,17 @@ export interface TacticalGridUnitConfig {
     initialVisibility?: number;
 }
 
-export class TacticalGridUnit extends BaseLoadUnit {
+/**
+ * TacticalGridUnit (Pure Generator Version)
+ *
+ * LIGHT 유닛: hologram.enable()은 빠른 작업이지만
+ * Pure Generator Manifesto에 따라 AsyncGenerator로 전환
+ */
+export class TacticalGridUnit extends BaseSlicedLoadUnit {
     readonly id = 'TacticalGrid';
     readonly phase = LoadingPhase.BUILDING;
     readonly requiredForReady = true;
+    readonly estimateCost: LoadUnitCost = 'LIGHT';
 
     private config: TacticalGridUnitConfig;
 
@@ -32,11 +48,16 @@ export class TacticalGridUnit extends BaseLoadUnit {
         this.config = config;
     }
 
-    protected async doLoad(
+    /**
+     * Time-Sliced 실행 (Pure Generator)
+     */
+    async *executeSteps(
         _scene: BABYLON.Scene,
+        _ctx: LoadExecutionContext,
         onProgress?: (progress: LoadUnitProgress) => void
-    ): Promise<void> {
+    ): AsyncGenerator<void, void, void> {
         onProgress?.({ progress: 0, message: 'Enabling tactical hologram...' });
+        yield; // 시작 지점
 
         const { hologram, initialVisibility = 0 } = this.config;
 
@@ -51,9 +72,12 @@ export class TacticalGridUnit extends BaseLoadUnit {
         const blockingFlag = measure.duration > 50 ? ' ⚠️ BLOCKING' : '';
         console.log(`[TacticalGridUnit] Hologram enabled: ${measure.duration.toFixed(1)}ms${blockingFlag}`);
 
+        yield; // hologram.enable() 후 yield
+
         hologram.setVisibility(initialVisibility);
 
         onProgress?.({ progress: 1, message: 'Tactical grid ready' });
+        yield; // 최종 yield
     }
 
     validate(_scene: BABYLON.Scene): boolean {

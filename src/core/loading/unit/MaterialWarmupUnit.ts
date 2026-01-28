@@ -1,5 +1,11 @@
 /**
- * MaterialWarmupUnit - Material 사전 컴파일 LoadUnit.
+ * MaterialWarmupUnit - Material 사전 컴파일 LoadUnit (Pure Generator Version)
+ *
+ * The Pure Generator Manifesto 준수:
+ * - AsyncGenerator로 완전 전환
+ * - while(ctx.isHealthy()) 패턴 적용
+ * - 각 material 컴파일 후 yield
+ * - 일정 간격으로 Recovery Frame 배치
  *
  * Babylon.js 8.x 필수 사항:
  * - material.isReady() === false인 메시는 첫 프레임에 active mesh에서 탈락
@@ -14,7 +20,12 @@
  */
 
 import * as BABYLON from '@babylonjs/core';
-import { BaseLoadUnit, LoadUnitProgress } from './LoadUnit';
+import {
+    BaseSlicedLoadUnit,
+    type LoadUnitCost,
+} from '../executor/SlicedLoadUnit';
+import type { LoadExecutionContext } from '../executor/LoadExecutionContext';
+import { LoadUnitProgress, LoadUnitStatus } from './LoadUnit';
 import { LoadingPhase } from '../protocol/LoadingPhase';
 
 /**
@@ -40,15 +51,20 @@ export interface MaterialWarmupConfig {
 }
 
 /**
- * MaterialWarmupUnit
+ * MaterialWarmupUnit (Pure Generator Version)
+ *
+ * ⚠️ NORMAL 유닛 (material 수가 적음): 각 material 후 yield
+ * 3개마다 Recovery Frame 배치
  */
-export class MaterialWarmupUnit extends BaseLoadUnit {
+export class MaterialWarmupUnit extends BaseSlicedLoadUnit {
     readonly id: string;
     readonly phase = LoadingPhase.WARMING;
     readonly requiredForReady: boolean;
+    readonly estimateCost: LoadUnitCost = 'MEDIUM';
 
     private config: MaterialWarmupConfig;
     private targetScene: BABYLON.Scene | null = null;
+    private dummy: BABYLON.Mesh | null = null;
 
     constructor(config: MaterialWarmupConfig) {
         super();
@@ -57,11 +73,18 @@ export class MaterialWarmupUnit extends BaseLoadUnit {
         this.requiredForReady = config.requiredForReady ?? true;
     }
 
-    protected async doLoad(
+    /**
+     * Time-Sliced 실행 (Pure Generator)
+     */
+    async *executeSteps(
         scene: BABYLON.Scene,
+        ctx: LoadExecutionContext,
         onProgress?: (progress: LoadUnitProgress) => void
-    ): Promise<void> {
+    ): AsyncGenerator<void, void, void> {
         const { materials, useUtilityLayer = true } = this.config;
+
+        onProgress?.({ progress: 0, message: 'Preparing material warmup...' });
+        yield; // 시작 지점
 
         if (materials.length === 0) {
             onProgress?.({ progress: 1, message: 'No materials to warmup' });
@@ -73,39 +96,85 @@ export class MaterialWarmupUnit extends BaseLoadUnit {
             ? BABYLON.UtilityLayerRenderer.DefaultUtilityLayer.utilityLayerScene
             : scene;
 
+        yield; // Scene 결정 후
+
         // 더미 메시 생성
-        const dummy = BABYLON.MeshBuilder.CreateSphere(
+        this.dummy = BABYLON.MeshBuilder.CreateSphere(
             '__MaterialWarmupDummy__',
             { diameter: 0.01 },
             this.targetScene
         );
-        dummy.isVisible = false;
+        this.dummy.isVisible = false;
+
+        yield; // 더미 메시 생성 후
+
+        const total = materials.length;
+        let index = 0;
+        let compiledInBatch = 0;
+
+        console.log(`[MaterialWarmupUnit] Warming ${total} materials...`);
 
         try {
-            for (let i = 0; i < materials.length; i++) {
-                const factory = materials[i];
-                const mat = factory(this.targetScene);
+            // Pure Generator: while(ctx.isHealthy()) 패턴
+            while (index < total) {
+                // Budget 체크
+                if (!ctx.isHealthy()) {
+                    yield;
+                }
 
-                dummy.material = mat;
+                const factory = materials[index];
+                const mat = factory(this.targetScene!);
+
+                this.dummy!.material = mat;
+
+                // Phase 2.7: Forensic profiling
+                performance.mark(`mat-compile-${index}-start`);
 
                 // forceCompilationAsync로 셰이더 컴파일
-                await mat.forceCompilationAsync(dummy);
+                await mat.forceCompilationAsync(this.dummy!);
+
+                performance.mark(`mat-compile-${index}-end`);
+                performance.measure(
+                    `mat-compile-${index}`,
+                    `mat-compile-${index}-start`,
+                    `mat-compile-${index}-end`
+                );
+                const measure = performance.getEntriesByName(`mat-compile-${index}`, 'measure')[0] as PerformanceMeasure;
+                const blockingFlag = measure.duration > 50 ? ' ⚠️ BLOCKING' : '';
+                console.log(`[MaterialWarmupUnit] Compiled ${mat.name}: ${measure.duration.toFixed(1)}ms${blockingFlag}`);
 
                 // warmup용 material dispose (실제 사용할 material은 별도 생성)
                 mat.dispose();
 
+                index++;
+                compiledInBatch++;
+
                 onProgress?.({
-                    progress: (i + 1) / materials.length,
-                    message: `Compiled ${i + 1}/${materials.length}`,
+                    progress: index / total,
+                    message: `Compiled ${index}/${total}`,
                 });
 
-                // Task fragmentation: yield to browser between heavy shader compilations
-                // This prevents RAF throttling due to main thread congestion
-                await new Promise<void>((r) => setTimeout(r, 0));
+                yield; // 각 material 컴파일 후 yield
+
+                // ⚠️ CRITICAL: 3개마다 Recovery Frame
+                if (compiledInBatch >= 3) {
+                    console.log(`[MaterialWarmupUnit] Recovery after ${compiledInBatch} materials...`);
+                    await ctx.requestRecoveryFrames(1);
+                    compiledInBatch = 0;
+                    yield;
+                }
             }
         } finally {
-            dummy.dispose();
+            // 더미 메시 정리
+            if (this.dummy && !this.dummy.isDisposed()) {
+                this.dummy.dispose();
+                this.dummy = null;
+            }
         }
+
+        onProgress?.({ progress: 1, message: 'Material warmup complete' });
+        console.log(`[MaterialWarmupUnit] ✅ Complete: ${total} materials warmed`);
+        yield; // 최종 yield
     }
 
     /**
@@ -113,6 +182,15 @@ export class MaterialWarmupUnit extends BaseLoadUnit {
      */
     validate(_scene: BABYLON.Scene): boolean {
         return true;
+    }
+
+    override dispose(): void {
+        if (this.dummy && !this.dummy.isDisposed()) {
+            this.dummy.dispose();
+            this.dummy = null;
+        }
+        this.targetScene = null;
+        this.status = LoadUnitStatus.PENDING;
     }
 
     // ========================================
