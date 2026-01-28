@@ -48,6 +48,7 @@ import { RenderDesyncProbe, markVisualReadyTimestamp, validateAcceptanceCriteria
 import { BlackHoleLogger } from '../debug/BlackHoleLogger';
 import { EnginePhysicalStateProbe } from '../debug/EnginePhysicalStateProbe';
 import { BlackHoleForensicProbe } from '../debug/BlackHoleForensicProbe';
+import { getBlackHoleDebugConfig, blackHoleDebugLog } from '../../../debug/BlackHoleDebugFlags';
 import { PhysicalReadyCaptureProbe } from '../debug/PhysicalReadyCaptureProbe';
 import { PhysicalReadyFlightRecorderProbe } from '../debug/PhysicalReadyFlightRecorderProbe';
 
@@ -335,39 +336,45 @@ export class NavigationScene {
             // === Phase 2.6: Initialize GPU Pulse System ===
             // GPU Pulse Host must be active BEFORE any loading begins.
             // This ensures continuous GPU heartbeat throughout the loading phase.
+            const debugConfig = getBlackHoleDebugConfig();
             this.gpuPulseSystem?.dispose();
 
             // Get GUI texture from system layer for debug overlay
             const guiTexture = this.systemLayer._host as GUI.AdvancedDynamicTexture | undefined;
 
-            this.gpuPulseSystem = GPUPulseSystem.create(
-                this.scene.getEngine() as BABYLON.Engine,
-                this.scene,
-                {
-                    debug: true,
-                    debugOverlay: !!guiTexture,
-                    guiTexture: guiTexture,
-                    recoveryTimeoutMs: 500,
-                    maxRecoveryRetries: 3,
-                }
-            );
-
-            // Register NavigationScene as pulse receiver
-            this.gpuPulseSystem.registerGameScene(this.createPulseReceiver());
-
-            // Begin GPU Pulse - Loading Host now owns the pulse
-            this.gpuPulseSystem.beginPulse('navigation-loading');
-
-            // ===== RAF WARM-UP GATE =====
-            // CRITICAL: Wait for RAF to stabilize BEFORE any heavy work.
-            // This prevents the 191ms main thread blocking from causing
-            // Chromium to classify the app as "idle" and throttle RAF.
-            hooks?.onLog?.('[WARMUP] Waiting for RAF stabilization...');
-            const warmupResult = await this.gpuPulseSystem.waitForWarmup();
-            if (warmupResult.success) {
-                hooks?.onLog?.(`[WARMUP] Gate OPEN (${warmupResult.stableFramesAchieved} stable frames, ${warmupResult.avgFrameIntervalMs.toFixed(1)}ms avg)`);
+            if (debugConfig.noPulse) {
+                blackHoleDebugLog('⚠️ GPUPulseSystem DISABLED by debug flag');
+                this.gpuPulseSystem = null;
             } else {
-                hooks?.onLog?.(`[WARMUP] Timeout (proceeding anyway)`);
+                this.gpuPulseSystem = GPUPulseSystem.create(
+                    this.scene.getEngine() as BABYLON.Engine,
+                    this.scene,
+                    {
+                        debug: true,
+                        debugOverlay: !!guiTexture,
+                        guiTexture: guiTexture,
+                        recoveryTimeoutMs: 500,
+                        maxRecoveryRetries: 3,
+                    }
+                );
+
+                // Register NavigationScene as pulse receiver
+                this.gpuPulseSystem.registerGameScene(this.createPulseReceiver());
+
+                // Begin GPU Pulse - Loading Host now owns the pulse
+                this.gpuPulseSystem.beginPulse('navigation-loading');
+
+                // ===== RAF WARM-UP GATE =====
+                // CRITICAL: Wait for RAF to stabilize BEFORE any heavy work.
+                // This prevents the 191ms main thread blocking from causing
+                // Chromium to classify the app as "idle" and throttle RAF.
+                hooks?.onLog?.('[WARMUP] Waiting for RAF stabilization...');
+                const warmupResult = await this.gpuPulseSystem.waitForWarmup();
+                if (warmupResult.success) {
+                    hooks?.onLog?.(`[WARMUP] Gate OPEN (${warmupResult.stableFramesAchieved} stable frames, ${warmupResult.avgFrameIntervalMs.toFixed(1)}ms avg)`);
+                } else {
+                    hooks?.onLog?.(`[WARMUP] Timeout (proceeding anyway)`);
+                }
             }
 
             // Create orchestrator
@@ -522,40 +529,66 @@ export class NavigationScene {
                 this.flightRecorder?.start();
                 this.flightRecorder?.markPhase('ENGINE_AWAKENED_START');
 
-                console.log('[ENGINE_AWAKENED] Starting two-phase barrier...');
-                hooks?.onLog?.('[ENGINE_AWAKENED] Phase 1: RAF burst, Phase 2: stable detection...');
+                // Check if ENGINE_AWAKENED barrier is disabled by debug flag
+                let awakenedResult: {
+                    passed: boolean;
+                    framesRendered: number;
+                    stableFrameCount: number;
+                    firstFrameDelayMs: number;
+                    avgFrameIntervalMs: number;
+                    burstCount: number;
+                    timedOut: boolean;
+                };
 
-                const awakenedResult = await waitForEngineAwakened(this.scene, {
-                    minConsecutiveFrames: 3,
-                    maxAllowedFrameGapMs: 100,  // Relaxed for DevTools-independent operation
-                    maxWaitMs: 3000,
-                    burstFrameCount: 5,
-                    maxBurstRetries: 2,
-                    gracefulFallbackMs: 500,    // Pass if ANY frames within 500ms (DevTools-independent)
-                    debug: true,
-                });
+                if (debugConfig.noBarrier) {
+                    blackHoleDebugLog('⚠️ ENGINE_AWAKENED barrier SKIPPED by debug flag');
+                    hooks?.onLog?.('[ENGINE_AWAKENED] ⚠️ SKIPPED by debug flag');
+                    // Mock result for skipped barrier
+                    awakenedResult = {
+                        passed: true,
+                        framesRendered: 0,
+                        stableFrameCount: 0,
+                        firstFrameDelayMs: 0,
+                        avgFrameIntervalMs: 0,
+                        burstCount: 0,
+                        timedOut: false,
+                    };
+                } else {
+                    console.log('[ENGINE_AWAKENED] Starting two-phase barrier...');
+                    hooks?.onLog?.('[ENGINE_AWAKENED] Phase 1: RAF burst, Phase 2: stable detection...');
 
-                if (!awakenedResult.passed) {
-                    // HARD FAIL — engine never achieved stable natural rendering
-                    console.error(
-                        '[ENGINE_AWAKENED] ✗ HARD GATE FAILED. READY will NOT be declared.',
-                        `naturalFrames=${awakenedResult.framesRendered}, ` +
-                        `stable=${awakenedResult.stableFrameCount}, ` +
-                        `firstNaturalFrameDelay=${awakenedResult.firstFrameDelayMs.toFixed(1)}ms, ` +
-                        `bursts=${awakenedResult.burstCount}, ` +
-                        `timedOut=${awakenedResult.timedOut}`
-                    );
-                    hooks?.onLog?.('[ENGINE_AWAKENED] ✗ HARD FAIL — natural render loop unstable');
-                    throw new Error(
-                        `ENGINE_AWAKENED barrier failed: ${awakenedResult.framesRendered} natural frames, ` +
-                        `${awakenedResult.stableFrameCount} stable (need 3), ` +
-                        `bursts=${awakenedResult.burstCount}`
-                    );
+                    awakenedResult = await waitForEngineAwakened(this.scene, {
+                        minConsecutiveFrames: 3,
+                        maxAllowedFrameGapMs: 100,  // Relaxed for DevTools-independent operation
+                        maxWaitMs: 3000,
+                        burstFrameCount: 5,
+                        maxBurstRetries: 2,
+                        gracefulFallbackMs: 500,    // Pass if ANY frames within 500ms (DevTools-independent)
+                        debug: true,
+                    });
+
+                    if (!awakenedResult.passed) {
+                        // HARD FAIL — engine never achieved stable natural rendering
+                        console.error(
+                            '[ENGINE_AWAKENED] ✗ HARD GATE FAILED. READY will NOT be declared.',
+                            `naturalFrames=${awakenedResult.framesRendered}, ` +
+                            `stable=${awakenedResult.stableFrameCount}, ` +
+                            `firstNaturalFrameDelay=${awakenedResult.firstFrameDelayMs.toFixed(1)}ms, ` +
+                            `bursts=${awakenedResult.burstCount}, ` +
+                            `timedOut=${awakenedResult.timedOut}`
+                        );
+                        hooks?.onLog?.('[ENGINE_AWAKENED] ✗ HARD FAIL — natural render loop unstable');
+                        throw new Error(
+                            `ENGINE_AWAKENED barrier failed: ${awakenedResult.framesRendered} natural frames, ` +
+                            `${awakenedResult.stableFrameCount} stable (need 3), ` +
+                            `bursts=${awakenedResult.burstCount}`
+                        );
+                    }
                 }
 
                 // ===== ACCEPTANCE CRITERIA VALIDATION =====
                 // First natural frame delay check
-                if (awakenedResult.firstFrameDelayMs > 50) {
+                if (!debugConfig.noBarrier && awakenedResult.firstFrameDelayMs > 50) {
                     console.warn(
                         `[ENGINE_AWAKENED] ⚠️ First natural frame delay ` +
                         `${awakenedResult.firstFrameDelayMs.toFixed(1)}ms > 50ms threshold ` +
@@ -614,10 +647,16 @@ export class NavigationScene {
                 // Wait for TacticalGrid to be confirmed in a NATURAL onBeforeRender→onAfterRender cycle.
                 // The camera transition above has started animating visibility from 0→1,
                 // so the grid will appear in activeMeshes once visibility > 0.
-                console.log('[VISUAL_READY v2] Waiting for TacticalGrid in natural frame...');
-                hooks?.onLog?.('[VISUAL_READY v2] Verifying TacticalGrid in natural RAF frame...');
+                // Check if VISUAL_READY is disabled by debug flag
+                if (debugConfig.noVisualReady) {
+                    blackHoleDebugLog('⚠️ VISUAL_READY check SKIPPED by debug flag');
+                    hooks?.onLog?.('[VISUAL_READY v2] ⚠️ SKIPPED by debug flag');
+                } else {
+                    console.log('[VISUAL_READY v2] Waiting for TacticalGrid in natural frame...');
+                    hooks?.onLog?.('[VISUAL_READY v2] Verifying TacticalGrid in natural RAF frame...');
 
-                await this.waitForNaturalVisualReady();
+                    await this.waitForNaturalVisualReady();
+                }
 
                 this.blackHoleLogger?.markPhase('VISUAL_READY_CONFIRMED');
                 this.blackHoleLogger?.snapshotGPUState('POST_VISUAL_READY');
