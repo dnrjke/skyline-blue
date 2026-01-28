@@ -2,6 +2,7 @@ import * as GUI from '@babylonjs/gui';
 import { ArcanaLoadingOverlay } from './ArcanaLoadingOverlay';
 import type { ArcanaLoadingOverlayConfig } from './ArcanaLoadingOverlay';
 import type { LoadingDebugger } from './LoadingDebugger';
+import { getBlackHoleDebugConfig, blackHoleDebugLog } from '../../debug/BlackHoleDebugFlags';
 
 const DEFAULT_TIPS: string[] = [
     'TIP: 노드를 선택하면 “선택 경로”가 즉시 갱신된다.',
@@ -21,9 +22,10 @@ export interface ArcanaLoadingEngineConfig {
  * - 실제 “무엇을 로드할지”는 core/scene(StageTransitionManager)가 소유
  */
 export class ArcanaLoadingEngine {
-    private overlay: ArcanaLoadingOverlay;
+    private overlay: ArcanaLoadingOverlay | null = null;
     private debugMode: boolean;
     private tip: string = DEFAULT_TIPS[0];
+    private disabled: boolean = false;
 
     private logs: string[] = [];
     private progress01: number = 0;
@@ -31,29 +33,39 @@ export class ArcanaLoadingEngine {
     private subtitle: string = '';
 
     constructor(parentLayer: GUI.Rectangle, config: ArcanaLoadingEngineConfig = {}) {
-        this.overlay = new ArcanaLoadingOverlay(parentLayer);
+        const debugConfig = getBlackHoleDebugConfig();
+        if (debugConfig.noOverlay) {
+            blackHoleDebugLog('⚠️ ArcanaLoadingOverlay DISABLED by debug flag');
+            this.disabled = true;
+            this.overlay = null;
+        } else {
+            this.overlay = new ArcanaLoadingOverlay(parentLayer);
+        }
         this.debugMode = config.debugMode ?? true;
         this.pickRandomTip();
     }
 
     show(title: string, subtitle: string): void {
+        if (this.disabled) return;
         this.title = title;
         this.subtitle = subtitle;
         this.logs = [];
         this.progress01 = 0;
         this.pickRandomTip();
-        this.overlay.show(this.getConfig());
+        this.overlay?.show(this.getConfig());
     }
 
     setProgress(progress01: number): void {
+        if (this.disabled) return;
         this.progress01 = Math.max(0, Math.min(1, progress01));
-        this.overlay.apply(this.getConfig());
+        this.overlay?.apply(this.getConfig());
     }
 
     log(line: string): void {
+        if (this.disabled) return;
         // keep small ring buffer
         this.logs = [...this.logs.slice(-6), line];
-        this.overlay.apply(this.getConfig());
+        this.overlay?.apply(this.getConfig());
     }
 
     attachDebugger(debuggerRef: LoadingDebugger | null): void {
@@ -67,17 +79,22 @@ export class ArcanaLoadingEngine {
      * Seamless close: 0.5s fade-out then hide
      */
     fadeOutAndHide(onDone?: () => void): void {
+        if (this.disabled || !this.overlay) {
+            onDone?.();
+            return;
+        }
         const durMs = 500;
         const start = performance.now();
+        const overlay = this.overlay;
         const tick = () => {
             const t = Math.min(1, (performance.now() - start) / durMs);
             const a = 1 - t;
-            this.overlay.setAlpha(a);
+            overlay.setAlpha(a);
             if (t < 1) {
                 requestAnimationFrame(tick);
             } else {
-                this.overlay.hide();
-                this.overlay.setAlpha(1);
+                overlay.hide();
+                overlay.setAlpha(1);
                 onDone?.();
             }
         };
@@ -85,11 +102,11 @@ export class ArcanaLoadingEngine {
     }
 
     hide(): void {
-        this.overlay.hide();
+        this.overlay?.hide();
     }
 
     dispose(): void {
-        this.overlay.dispose();
+        this.overlay?.dispose();
     }
 
     private pickRandomTip(): void {

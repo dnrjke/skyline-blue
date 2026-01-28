@@ -13,7 +13,8 @@
  *   ?blackhole-no-warmup                - Disable material warmup
  *   ?blackhole-no-barrier               - Disable ENGINE_AWAKENED barrier
  *   ?blackhole-no-visualready           - Disable VISUAL_READY check
- *   ?blackhole-minimal                  - Disable all optional components
+ *   ?blackhole-minimal                  - Disable: pulse, barrier, visualready
+ *   ?blackhole-nuclear                  - Disable ALL optional components (wide net)
  *
  * Example: http://localhost:3000/?blackhole-no-overlay&blackhole-no-pulse
  */
@@ -43,8 +44,11 @@ export interface BlackHoleDebugConfig {
     /** Disable VISUAL_READY check (pass immediately) */
     noVisualReady: boolean;
 
-    /** Minimal mode - disable all optional components */
+    /** Minimal mode - disable: pulse, barrier, visualready */
     minimal: boolean;
+
+    /** Nuclear mode - disable ALL optional components */
+    nuclear: boolean;
 }
 
 let cachedConfig: BlackHoleDebugConfig | null = null;
@@ -60,17 +64,20 @@ export function getBlackHoleDebugConfig(): BlackHoleDebugConfig {
     const params = new URLSearchParams(window.location.search);
 
     const minimal = params.has('blackhole-minimal');
+    const nuclear = params.has('blackhole-nuclear');
 
     cachedConfig = {
         debug: params.has('blackhole-debug'),
-        noOverlay: minimal || params.has('blackhole-no-overlay'),
-        noPulse: minimal || params.has('blackhole-no-pulse'),
-        noQuality: minimal || params.has('blackhole-no-quality'),
-        noGUI: minimal || params.has('blackhole-no-gui'),
-        noWarmup: minimal || params.has('blackhole-no-warmup'),
-        noBarrier: minimal || params.has('blackhole-no-barrier'),
-        noVisualReady: minimal || params.has('blackhole-no-visualready'),
+        // Nuclear disables everything; minimal disables pulse/barrier/visualready only
+        noOverlay: nuclear || params.has('blackhole-no-overlay'),
+        noPulse: nuclear || minimal || params.has('blackhole-no-pulse'),
+        noQuality: nuclear || params.has('blackhole-no-quality'),
+        noGUI: nuclear || params.has('blackhole-no-gui'),
+        noWarmup: nuclear || params.has('blackhole-no-warmup'),
+        noBarrier: nuclear || minimal || params.has('blackhole-no-barrier'),
+        noVisualReady: nuclear || minimal || params.has('blackhole-no-visualready'),
         minimal,
+        nuclear,
     };
 
     // Log config if any flag is set
@@ -78,7 +85,11 @@ export function getBlackHoleDebugConfig(): BlackHoleDebugConfig {
     if (anyFlagSet) {
         console.log('');
         console.log('╔══════════════════════════════════════════╗');
-        console.log('║     BLACK HOLE DEBUG MODE ACTIVE         ║');
+        if (cachedConfig.nuclear) {
+            console.log('║  ☢️  BLACK HOLE NUCLEAR MODE ACTIVE  ☢️   ║');
+        } else {
+            console.log('║     BLACK HOLE DEBUG MODE ACTIVE         ║');
+        }
         console.log('╠══════════════════════════════════════════╣');
         console.log('║  Disabled components:                    ║');
         if (cachedConfig.noOverlay) console.log('║    ✗ ArcanaLoadingOverlay                ║');

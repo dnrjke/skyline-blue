@@ -432,28 +432,32 @@ export class NavigationScene {
                     initialVisibility: 0,
                 }),
                 new OctreeUnit(),
+            ];
 
-                // WARMING phase
+            // WARMING phase (conditionally added)
+            if (debugConfig.noWarmup) {
+                blackHoleDebugLog('⚠️ Material warmup units SKIPPED by debug flag');
+            } else {
                 // 1. Navigation-specific emissive materials (path effects, nodes)
-                MaterialWarmupUnit.createNavigationWarmupUnit(),
+                units.push(MaterialWarmupUnit.createNavigationWarmupUnit());
                 // 2. Scene-wide material warmup (🅰️+ Active Engagement Strategy)
                 //    Warms ALL materials from loaded meshes including TacticalGrid and character
-                SceneMaterialWarmupUnit.createForNavigation(),
+                units.push(SceneMaterialWarmupUnit.createForNavigation());
+            }
 
-                // BARRIER phase
-                RenderReadyBarrierUnit.createForNavigation({
-                    requirements: [
-                        {
-                            id: this.hologram.getGridMeshName(),
-                            evidence: 'RENDER_READY',
-                        } as BarrierRequirement,
-                    ],
-                }),
+            // BARRIER phase
+            units.push(RenderReadyBarrierUnit.createForNavigation({
+                requirements: [
+                    {
+                        id: this.hologram.getGridMeshName(),
+                        evidence: 'RENDER_READY',
+                    } as BarrierRequirement,
+                ],
+            }));
 
-                // NOTE: VisualReadyUnit is deliberately NOT registered here.
-                // VISUAL_READY verification is performed AFTER ENGINE_AWAKENED barrier,
-                // ensuring TacticalGrid is confirmed in a NATURAL RAF frame (not forced burst).
-            ];
+            // NOTE: VisualReadyUnit is deliberately NOT registered here.
+            // VISUAL_READY verification is performed AFTER ENGINE_AWAKENED barrier,
+            // ensuring TacticalGrid is confirmed in a NATURAL RAF frame (not forced burst).
 
             // Add character unit if configured
             if (this.characterLoadUnit) {
