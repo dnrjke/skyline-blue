@@ -1,5 +1,11 @@
 /**
- * SceneMaterialWarmupUnit - Comprehensive Scene Material Warm-up
+ * SceneMaterialWarmupUnit - Comprehensive Scene Material Warm-up (Pure Generator Version)
+ *
+ * The Pure Generator Manifesto 준수:
+ * - AsyncGenerator로 완전 전환
+ * - forceCompilationAsync 후 Recovery Frame 배치
+ * - 모든 루프는 while(ctx.isHealthy()) 패턴
+ * - 절대 batch compile 금지 (material 단위 컴파일)
  *
  * PURPOSE:
  * Pre-compile ALL materials in the scene before first render.
@@ -7,28 +13,16 @@
  * GPU shaders are compiled and the GPU scheduler treats this tab
  * as an active graphics application.
  *
- * WHAT IT WARMS:
- * 1. All materials in scene.materials
- * 2. Materials attached to meshes (including internal LinesMesh materials)
- * 3. Materials from loaded GLB/GLTF models (PBR materials)
- * 4. Custom effect materials (e.g., hologram effects)
- *
- * HOW IT WORKS:
- * - Iterates through all meshes and collects unique materials
- * - For each material: await material.forceCompilationAsync(mesh)
- * - Uses task fragmentation (setTimeout) to prevent RAF throttling
- * - Does NOT dispose materials (they're used in scene)
- *
- * IMPORTANT:
- * - This must run AFTER meshes are loaded (BUILDING phase complete)
- * - Uses the actual meshes as compilation targets (not dummy spheres)
- * - LinesMesh materials require special handling
- *
  * @see docs/babylon_rendering_rules.md
  */
 
 import * as BABYLON from '@babylonjs/core';
-import { BaseLoadUnit, LoadUnitProgress } from './LoadUnit';
+import {
+    BaseSlicedLoadUnit,
+    type LoadUnitCost,
+} from '../executor/SlicedLoadUnit';
+import type { LoadExecutionContext } from '../executor/LoadExecutionContext';
+import { LoadUnitProgress, LoadUnitStatus } from './LoadUnit';
 import { LoadingPhase } from '../protocol/LoadingPhase';
 
 export interface SceneMaterialWarmupConfig {
@@ -55,14 +49,16 @@ interface WarmupTarget {
 }
 
 /**
- * SceneMaterialWarmupUnit
+ * SceneMaterialWarmupUnit (Pure Generator Version)
  *
- * Warms up all materials in the scene by forcing async shader compilation.
+ * ⚠️ HEAVY 유닛: shader 컴파일은 GPU 블로킹이므로
+ * 각 material 후 budget 체크 및 주기적 Recovery Frame 배치
  */
-export class SceneMaterialWarmupUnit extends BaseLoadUnit {
+export class SceneMaterialWarmupUnit extends BaseSlicedLoadUnit {
     readonly id: string;
     readonly phase = LoadingPhase.WARMING;
     readonly requiredForReady: boolean;
+    readonly estimateCost: LoadUnitCost = 'HEAVY';
 
     private config: Required<SceneMaterialWarmupConfig>;
     private warmedMaterials: Set<string> = new Set();
@@ -83,17 +79,43 @@ export class SceneMaterialWarmupUnit extends BaseLoadUnit {
         this.requiredForReady = this.config.requiredForReady;
     }
 
-    protected async doLoad(
+    /**
+     * Time-Sliced 실행 (Pure Generator)
+     *
+     * 구조:
+     * 1. 타겟 수집 (빠름, 한 번에)
+     * 2. Material 컴파일 (while ctx.isHealthy() 루프)
+     *    - 각 material 후 yield
+     *    - 5개마다 Recovery Frame
+     */
+    async *executeSteps(
         scene: BABYLON.Scene,
+        ctx: LoadExecutionContext,
         onProgress?: (progress: LoadUnitProgress) => void
-    ): Promise<void> {
+    ): AsyncGenerator<void, void, void> {
         this.warmedMaterials.clear();
         this.warmedCount = 0;
         this.skippedCount = 0;
         this.failedCount = 0;
 
-        // Collect all unique material-mesh pairs
+        onProgress?.({ progress: 0, message: 'Collecting materials...' });
+        yield; // 시작 지점
+
+        // ========================================
+        // Phase 1: 타겟 수집 (동기, 빠름)
+        // ========================================
+        console.log('[SceneMaterialWarmup] Phase 1: Collecting targets...');
+        performance.mark('warmup-collect-start');
+
         const targets = this.collectWarmupTargets(scene);
+
+        performance.mark('warmup-collect-end');
+        performance.measure('warmup-collect', 'warmup-collect-start', 'warmup-collect-end');
+        const collectMeasure = performance.getEntriesByName('warmup-collect', 'measure')[0] as PerformanceMeasure;
+        const collectBlockingFlag = collectMeasure.duration > 50 ? ' ⚠️ BLOCKING' : '';
+        console.log(`[SceneMaterialWarmup] Collected ${targets.length} targets: ${collectMeasure.duration.toFixed(1)}ms${collectBlockingFlag}`);
+
+        yield; // 타겟 수집 완료
 
         if (targets.length === 0) {
             if (this.config.debug) {
@@ -109,8 +131,22 @@ export class SceneMaterialWarmupUnit extends BaseLoadUnit {
             console.log(`[SceneMaterialWarmup] Warming ${total} materials...`);
         }
 
-        for (let i = 0; i < total; i++) {
-            const target = targets[i];
+        // ========================================
+        // Phase 2: Material 컴파일 (while ctx.isHealthy() 루프)
+        // ========================================
+        console.log('[SceneMaterialWarmup] Phase 2: Compiling materials...');
+        onProgress?.({ progress: 0.1, message: 'Compiling shaders...' });
+
+        let index = 0;
+        let compiledInBatch = 0;
+
+        while (index < total) {
+            // Budget 체크: 초과 시 루프 탈출 → yield → 다음 프레임에 재개
+            if (!ctx.isHealthy()) {
+                yield;
+            }
+
+            const target = targets[index];
             const success = await this.warmupMaterial(target);
 
             if (success) {
@@ -119,22 +155,38 @@ export class SceneMaterialWarmupUnit extends BaseLoadUnit {
                 this.failedCount++;
             }
 
+            index++;
+            compiledInBatch++;
+
+            // Progress 업데이트
+            const progress = 0.1 + (index / total) * 0.85;
             onProgress?.({
-                progress: (i + 1) / total,
-                message: `Compiled ${i + 1}/${total}: ${target.material.name}`,
+                progress,
+                message: `Compiled ${index}/${total}: ${target.material.name}`,
             });
 
-            // Task fragmentation: yield to browser between shader compilations
-            // This prevents main thread congestion that triggers RAF throttling
-            await new Promise<void>((r) => setTimeout(r, 0));
+            yield; // 각 material 컴파일 후 yield
+
+            // ⚠️ CRITICAL: 5개마다 Recovery Frame
+            // GPU 업로드 직후 브라우저 안정화
+            if (compiledInBatch >= 5) {
+                console.log(`[SceneMaterialWarmup] Recovery after ${compiledInBatch} materials...`);
+                await ctx.requestRecoveryFrames(1);
+                compiledInBatch = 0;
+                yield;
+            }
         }
 
-        if (this.config.debug) {
-            console.log(
-                `[SceneMaterialWarmup] Complete: ` +
-                `warmed=${this.warmedCount}, skipped=${this.skippedCount}, failed=${this.failedCount}`
-            );
-        }
+        // ========================================
+        // 완료
+        // ========================================
+        onProgress?.({ progress: 1, message: 'Warmup complete' });
+        console.log(
+            `[SceneMaterialWarmup] ✅ Complete: ` +
+            `warmed=${this.warmedCount}, skipped=${this.skippedCount}, failed=${this.failedCount}`
+        );
+
+        yield; // 최종 yield
     }
 
     validate(_scene: BABYLON.Scene): boolean {
@@ -308,5 +360,13 @@ export class SceneMaterialWarmupUnit extends BaseLoadUnit {
             requiredForReady: true,
             debug: true,
         });
+    }
+
+    override dispose(): void {
+        this.warmedMaterials.clear();
+        this.warmedCount = 0;
+        this.skippedCount = 0;
+        this.failedCount = 0;
+        this.status = LoadUnitStatus.PENDING;
     }
 }

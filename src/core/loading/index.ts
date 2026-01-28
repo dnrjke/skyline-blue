@@ -129,6 +129,64 @@ export { RenderingIntentKeeper } from './engagement/RenderingIntentKeeper';
 export type { RenderingIntentKeeperConfig, IntentMetrics } from './engagement/RenderingIntentKeeper';
 
 // ========================================
+// Pure Generator Manifesto (Time-Sliced Execution)
+// ========================================
+
+// SlicedLoadUnit Interface
+export {
+    BaseSlicedLoadUnit,
+    isSlicedLoadUnit,
+} from './executor/SlicedLoadUnit';
+export type {
+    SlicedLoadUnit,
+    LoadUnitCost,
+} from './executor/SlicedLoadUnit';
+
+// Execution Context (4ms Rule)
+export {
+    LoadExecutionContext,
+    DEFAULT_FRAME_BUDGET_MS,
+    AGGRESSIVE_FRAME_BUDGET_MS,
+    DEFAULT_RECOVERY_FRAMES,
+    createAggressiveContext,
+} from './executor/LoadExecutionContext';
+export type { ExecutionContextStats } from './executor/LoadExecutionContext';
+
+// RAF Health Guard (Pacemaker)
+export {
+    RAFHealthGuard,
+    RAFHealthStatus,
+    getGlobalRAFHealthGuard,
+    resetGlobalRAFHealthGuard,
+} from './executor/RAFHealthGuard';
+export type { RAFHealthGuardConfig } from './executor/RAFHealthGuard';
+
+// Load Unit Executor
+export {
+    LoadUnitExecutor,
+    createLoadUnitExecutor,
+} from './executor/LoadUnitExecutor';
+export type {
+    ExecutionResult,
+    ExecutorConfig,
+} from './executor/LoadUnitExecutor';
+
+// Frame Budget Yield Utilities
+export {
+    nextFrame,
+    yieldMicrotask,
+    FrameBudget,
+    processWithYield,
+    batchWithYield,
+    LoadUnitProfiler,
+    LoadingProfileAggregator,
+} from './FrameBudgetYield';
+export type {
+    LoadUnitProfileReport,
+    LoadingProfileSummary,
+} from './FrameBudgetYield';
+
+// ========================================
 // Legacy: MaterialWarmupHelper (호환성)
 // ========================================
 export { MaterialWarmupHelper } from './warmup/MaterialWarmupHelper';
