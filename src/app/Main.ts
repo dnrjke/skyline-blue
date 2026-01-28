@@ -24,6 +24,9 @@ const IS_DEV = typeof import.meta !== 'undefined' && (import.meta as any).env?.D
 // RAF Lab - Isolated debugging tool for RAF throttle issues
 // Usage: Add ?raf-lab to URL
 import { checkAndLaunchRAFLab } from '../debug/raf-lab/launcher';
+// Transition Lab - Scene transition debugging tool
+// Usage: Add ?transition-lab to URL
+import { checkAndLaunchTransitionLab } from '../debug/transition-lab/launcher';
 // Black Hole Debug Flags - Component isolation testing
 import { getBlackHoleDebugConfig, blackHoleDebugLog } from '../debug/BlackHoleDebugFlags';
 import { GUIManager } from '../shared/ui/GUIManager';
@@ -240,11 +243,19 @@ class Main {
 
 // Initialize on DOM ready
 window.addEventListener('DOMContentLoaded', async () => {
-    // Check for RAF Lab mode first
     const canvas = document.getElementById('renderCanvas') as HTMLCanvasElement;
+
+    // Check for debug lab modes first (they bypass normal game flow)
+
+    // RAF Lab mode
     if (canvas && await checkAndLaunchRAFLab(canvas)) {
-        // RAF Lab is running, skip normal game initialization
         console.log('[System] RAF Lab mode active - Normal game flow bypassed');
+        return;
+    }
+
+    // Transition Lab mode
+    if (canvas && await checkAndLaunchTransitionLab(canvas)) {
+        console.log('[System] Transition Lab mode active - Normal game flow bypassed');
         return;
     }
 
