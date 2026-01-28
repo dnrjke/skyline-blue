@@ -623,6 +623,323 @@ export class PhaseRunner {
     }
 
     /**
+     * Run Scene Transition phase
+     * Tests creating a new scene (like Host → Navigation transition)
+     */
+    async runSceneTransitionPhase(): Promise<PhaseResult> {
+        const phaseName = 'Scene Transition';
+        const startTime = performance.now();
+        const engine = this.scene.getEngine();
+
+        this.log(`[${phaseName}] Starting...`);
+        this.log(`[${phaseName}] Simulating Host → Navigation scene switch...`);
+
+        // Measure RAF before
+        const rafBefore = await this.rafMeter.measure(this.scene, 20);
+
+        // Track throttle
+        let throttleDetected = false;
+        let throttleDetectedAtMs: number | null = null;
+        let maxBlockingMs = 0;
+
+        const stopMonitor = this.rafMeter.measureContinuous(
+            this.scene,
+            (interval, stats) => {
+                if (interval > maxBlockingMs) {
+                    maxBlockingMs = interval;
+                }
+                if (stats.isThrottled && !throttleDetected) {
+                    throttleDetected = true;
+                    throttleDetectedAtMs = performance.now() - startTime;
+                    this.log(`[${phaseName}] ⚠️ THROTTLE DETECTED at ${throttleDetectedAtMs.toFixed(0)}ms`);
+                }
+            },
+            5
+        );
+
+        // Step 1: Store current scene reference
+        const oldScene = this.scene;
+        this.log(`[${phaseName}] Step 1: Current scene has ${oldScene.meshes.length} meshes`);
+
+        // Step 2: Create new scene (like NavigationScene creation)
+        this.log(`[${phaseName}] Step 2: Creating new scene...`);
+        const newScene = new BABYLON.Scene(engine);
+
+        // Step 3: Setup new scene basics (like NavigationScene.initializeScene)
+        newScene.clearColor = new BABYLON.Color4(0.02, 0.05, 0.08, 1);
+        const camera = new BABYLON.ArcRotateCamera(
+            'navCamera',
+            Math.PI / 4,
+            Math.PI / 3,
+            30,
+            BABYLON.Vector3.Zero(),
+            newScene
+        );
+        camera.attachControl(engine.getRenderingCanvas()!, true);
+
+        // Add basic light
+        new BABYLON.HemisphericLight('light', new BABYLON.Vector3(0, 1, 0), newScene);
+
+        this.log(`[${phaseName}] Step 3: New scene created with camera`);
+
+        // Step 4: Switch render loop to new scene
+        this.log(`[${phaseName}] Step 4: Switching render loop...`);
+        engine.stopRenderLoop();
+        engine.runRenderLoop(() => {
+            newScene.render();
+        });
+
+        // Wait for render loop to settle
+        await this.waitFramesOnScene(newScene, 5);
+
+        // Step 5: Dispose old scene (simulate cleanup)
+        this.log(`[${phaseName}] Step 5: Disposing old scene...`);
+        // Note: In real game, old scene is NOT disposed immediately
+        // but we're testing if scene switch causes throttle
+
+        // Update internal reference for subsequent phases
+        this.scene = newScene;
+
+        await this.waitFrames(10);
+
+        stopMonitor();
+
+        // Measure RAF after
+        const rafAfter = await this.rafMeter.measure(newScene, 20);
+
+        return {
+            phaseName,
+            rafBefore,
+            rafAfter,
+            throttleDetected,
+            throttleDetectedAtMs,
+            maxBlockingMs,
+            elapsedMs: performance.now() - startTime,
+            error: null,
+        };
+    }
+
+    /**
+     * Run Engine Resize phase
+     * Tests engine.resize() call (like finalizeNavigationReady)
+     */
+    async runEngineResizePhase(): Promise<PhaseResult> {
+        const phaseName = 'Engine Resize';
+        const startTime = performance.now();
+        const engine = this.scene.getEngine();
+
+        this.log(`[${phaseName}] Starting...`);
+        this.log(`[${phaseName}] Simulating finalizeNavigationReady() resize sequence...`);
+
+        // Measure RAF before
+        const rafBefore = await this.rafMeter.measure(this.scene, 20);
+
+        // Track throttle
+        let throttleDetected = false;
+        let throttleDetectedAtMs: number | null = null;
+        let maxBlockingMs = 0;
+
+        const stopMonitor = this.rafMeter.measureContinuous(
+            this.scene,
+            (interval, stats) => {
+                if (interval > maxBlockingMs) {
+                    maxBlockingMs = interval;
+                }
+                if (stats.isThrottled && !throttleDetected) {
+                    throttleDetected = true;
+                    throttleDetectedAtMs = performance.now() - startTime;
+                    this.log(`[${phaseName}] ⚠️ THROTTLE DETECTED at ${throttleDetectedAtMs.toFixed(0)}ms`);
+                }
+            },
+            5
+        );
+
+        // Log current state
+        this.log(`[${phaseName}] Before resize: ${engine.getRenderWidth()}x${engine.getRenderHeight()}`);
+        this.log(`[${phaseName}] Hardware scaling: ${engine.getHardwareScalingLevel()}`);
+
+        // Step 1: Force engine resize (exactly like finalizeNavigationReady)
+        this.log(`[${phaseName}] Step 1: Calling engine.resize()...`);
+        performance.mark('engine-resize-start');
+        engine.resize();
+        performance.mark('engine-resize-end');
+        performance.measure('engine-resize', 'engine-resize-start', 'engine-resize-end');
+
+        const resizeMeasure = performance.getEntriesByName('engine-resize')[0];
+        const resizeDuration = resizeMeasure?.duration ?? 0;
+        this.log(`[${phaseName}] engine.resize() took ${resizeDuration.toFixed(1)}ms`);
+
+        performance.clearMarks('engine-resize-start');
+        performance.clearMarks('engine-resize-end');
+        performance.clearMeasures('engine-resize');
+
+        // Step 2: Force render (like finalizeNavigationReady)
+        this.log(`[${phaseName}] Step 2: Forcing scene.render()...`);
+        this.scene.render();
+
+        await this.waitFrames(5);
+
+        // Step 3: Try hardware scaling change (like RenderQualityManager)
+        this.log(`[${phaseName}] Step 3: Testing hardware scaling change...`);
+        const originalScaling = engine.getHardwareScalingLevel();
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        const targetScaling = 1 / dpr;
+
+        performance.mark('scaling-change-start');
+        engine.setHardwareScalingLevel(targetScaling);
+        engine.resize();
+        performance.mark('scaling-change-end');
+        performance.measure('scaling-change', 'scaling-change-start', 'scaling-change-end');
+
+        const scalingMeasure = performance.getEntriesByName('scaling-change')[0];
+        const scalingDuration = scalingMeasure?.duration ?? 0;
+        this.log(`[${phaseName}] Hardware scaling change took ${scalingDuration.toFixed(1)}ms`);
+
+        performance.clearMarks('scaling-change-start');
+        performance.clearMarks('scaling-change-end');
+        performance.clearMeasures('scaling-change');
+
+        // Restore original scaling
+        engine.setHardwareScalingLevel(originalScaling);
+        engine.resize();
+
+        this.log(`[${phaseName}] After resize: ${engine.getRenderWidth()}x${engine.getRenderHeight()}`);
+
+        await this.waitFrames(10);
+
+        stopMonitor();
+
+        // Measure RAF after
+        const rafAfter = await this.rafMeter.measure(this.scene, 20);
+
+        return {
+            phaseName,
+            rafBefore,
+            rafAfter,
+            throttleDetected,
+            throttleDetectedAtMs,
+            maxBlockingMs: Math.max(maxBlockingMs, resizeDuration, scalingDuration),
+            elapsedMs: performance.now() - startTime,
+            error: null,
+        };
+    }
+
+    /**
+     * Run Visibility Animation phase
+     * Tests grid visibility 0→1 animation (like camera transition)
+     */
+    async runVisibilityAnimationPhase(): Promise<PhaseResult> {
+        const phaseName = 'Visibility Animation';
+        const startTime = performance.now();
+
+        this.log(`[${phaseName}] Starting...`);
+        this.log(`[${phaseName}] Simulating camera transition visibility animation (0→1 over 1.1s)...`);
+
+        // Measure RAF before
+        const rafBefore = await this.rafMeter.measure(this.scene, 20);
+
+        // Track throttle
+        let throttleDetected = false;
+        let throttleDetectedAtMs: number | null = null;
+        let maxBlockingMs = 0;
+
+        const stopMonitor = this.rafMeter.measureContinuous(
+            this.scene,
+            (interval, stats) => {
+                if (interval > maxBlockingMs) {
+                    maxBlockingMs = interval;
+                }
+                if (stats.isThrottled && !throttleDetected) {
+                    throttleDetected = true;
+                    throttleDetectedAtMs = performance.now() - startTime;
+                    this.log(`[${phaseName}] ⚠️ THROTTLE DETECTED at ${throttleDetectedAtMs.toFixed(0)}ms`);
+                }
+            },
+            5
+        );
+
+        // Get or create TacticalGrid
+        let hologram = (this as any)._testHologram as TacticalHologram | undefined;
+        if (!hologram) {
+            this.log(`[${phaseName}] Creating new TacticalHologram...`);
+            hologram = new TacticalHologram(this.scene);
+            hologram.enable();
+            (this as any)._testHologram = hologram;
+        }
+
+        // Start with visibility 0
+        hologram.setVisibility(0);
+        this.log(`[${phaseName}] Grid visibility set to 0`);
+
+        await this.waitFrames(5);
+
+        // Animate visibility 0→1 over 1.1 seconds (like camera transition)
+        const animationDuration = 1100; // ms
+        const animationStart = performance.now();
+        let frameCount = 0;
+
+        await new Promise<void>((resolve) => {
+            const observer = this.scene.onBeforeRenderObservable.add(() => {
+                const elapsed = performance.now() - animationStart;
+                const t = Math.min(1, elapsed / animationDuration);
+
+                // Ease-out cubic (like typical camera transition)
+                const eased = 1 - Math.pow(1 - t, 3);
+                hologram!.setVisibility(eased);
+                frameCount++;
+
+                if (t >= 1) {
+                    this.scene.onBeforeRenderObservable.remove(observer);
+                    resolve();
+                }
+            });
+
+            // Safety timeout
+            setTimeout(() => {
+                this.scene.onBeforeRenderObservable.remove(observer);
+                resolve();
+            }, animationDuration + 500);
+        });
+
+        this.log(`[${phaseName}] Animation complete: ${frameCount} frames over ${(performance.now() - animationStart).toFixed(0)}ms`);
+        this.log(`[${phaseName}] Final visibility: ${hologram.isCreated() ? '✓ visible' : '✗ not created'}`);
+
+        await this.waitFrames(10);
+
+        stopMonitor();
+
+        // Measure RAF after
+        const rafAfter = await this.rafMeter.measure(this.scene, 20);
+
+        return {
+            phaseName,
+            rafBefore,
+            rafAfter,
+            throttleDetected,
+            throttleDetectedAtMs,
+            maxBlockingMs,
+            elapsedMs: performance.now() - startTime,
+            error: null,
+        };
+    }
+
+    /**
+     * Wait for N frames on a specific scene
+     */
+    private waitFramesOnScene(scene: BABYLON.Scene, count: number): Promise<void> {
+        return new Promise((resolve) => {
+            let remaining = count;
+            const observer = scene.onBeforeRenderObservable.add(() => {
+                remaining--;
+                if (remaining <= 0) {
+                    scene.onBeforeRenderObservable.remove(observer);
+                    resolve();
+                }
+            });
+        });
+    }
+
+    /**
      * Wait for N frames
      */
     private waitFrames(count: number): Promise<void> {
