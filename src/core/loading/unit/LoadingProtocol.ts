@@ -2,6 +2,7 @@
  * LoadingProtocol - LoadUnit 기반 로딩 오케스트레이션.
  *
  * [TacticalGrid Incident Prevention - Constitutional Amendment]
+ * [The Pure Generator Manifesto Integration]
  *
  * Phase Flow (Final Form):
  *   FETCHING → BUILDING → WARMING → BARRIER
@@ -12,6 +13,12 @@
  * - VISUAL_READY에서 실제 시각 요소 검증 (frustum-based)
  * - STABILIZING_100에서 안정화 홀드 (300ms/30frames)
  * - POST_READY: READY 후 +1 render frame 대기 후 input unlock
+ *
+ * Pure Generator Manifesto:
+ * - 모든 LoadUnit은 AsyncGenerator(SlicedLoadUnit)로 전환 필수
+ * - LoadUnitExecutor를 통한 자동 Time-Slicing
+ * - 4ms Rule 강제, Recovery Frame 배치
+ * - Max Main Thread Blocking > 50ms = 설계 실패
  *
  * VisualRequirement Lifecycle:
  * - attach(): 검증 시작 시 observer 등록
@@ -46,6 +53,17 @@ import { LoadingRegistry } from './LoadingRegistry';
 import { LoadingPhase } from '../protocol/LoadingPhase';
 import { RenderReadyBarrier, BarrierValidation } from '../barrier/RenderReadyBarrier';
 import { STABILIZATION_SETTINGS } from '../progress/ArcanaProgressModel';
+
+// Pure Generator Manifesto imports
+import {
+    isSlicedLoadUnit,
+    type SlicedLoadUnit,
+} from '../executor/SlicedLoadUnit';
+import {
+    LoadUnitExecutor,
+    type ExecutionResult,
+} from '../executor/LoadUnitExecutor';
+import { resetGlobalRAFHealthGuard } from '../executor/RAFHealthGuard';
 
 /**
  * Protocol 실행 옵션
@@ -119,10 +137,17 @@ export class LoadingProtocol {
     private currentPhase: LoadingPhase = LoadingPhase.PENDING;
     private cancelled: boolean = false;
 
+    // Pure Generator Manifesto: Time-Sliced Executor
+    private executor: LoadUnitExecutor;
+
+    // 설계 실패 감지용 통계
+    private designFailureUnits: string[] = [];
+
     constructor(scene: BABYLON.Scene, registry: LoadingRegistry) {
         this.scene = scene;
         this.registry = registry;
         this.barrier = new RenderReadyBarrier(scene);
+        this.executor = new LoadUnitExecutor({ debug: true });
     }
 
     /**
@@ -146,6 +171,12 @@ export class LoadingProtocol {
         const startTime = performance.now();
         const phaseTimes = new Map<LoadingPhase, number>();
         this.cancelled = false;
+        this.designFailureUnits = [];
+
+        // [Pure Generator Manifesto] RAFHealthGuard 시작
+        resetGlobalRAFHealthGuard();
+        this.executor.startHealthGuard();
+        console.log('[LoadingProtocol] RAFHealthGuard started');
 
         const setPhase = (phase: LoadingPhase) => {
             this.currentPhase = phase;
@@ -216,6 +247,20 @@ export class LoadingProtocol {
             options.onLog?.(`[READY] Loading complete: ${Math.round(totalMs)}ms`);
             options.onProgress?.(1);
 
+            // [Pure Generator Manifesto] RAFHealthGuard 중지
+            this.executor.stopHealthGuard();
+            console.log('[LoadingProtocol] RAFHealthGuard stopped');
+
+            // 설계 실패 경고 출력
+            if (this.designFailureUnits.length > 0) {
+                console.error(
+                    `[LoadingProtocol] ❌ DESIGN FAILURE DETECTED:\n` +
+                    `  Units with Max Blocking > 50ms:\n` +
+                    this.designFailureUnits.map(id => `    - ${id}`).join('\n') +
+                    `\n  These units violate The Pure Generator Manifesto.`
+                );
+            }
+
             // onAfterReady는 다음 프레임에서 실행
             if (options.onAfterReady) {
                 this.scene.onAfterRenderObservable.addOnce(() => {
@@ -230,6 +275,9 @@ export class LoadingProtocol {
                 failedUnits: [],
             };
         } catch (err) {
+            // [Pure Generator Manifesto] RAFHealthGuard 중지 (에러 시에도)
+            this.executor.stopHealthGuard();
+
             setPhase(LoadingPhase.FAILED);
             const error = err instanceof Error ? err : new Error(String(err));
             options.onLog?.(`[FAILED] ${error.message}`);
@@ -246,6 +294,10 @@ export class LoadingProtocol {
 
     /**
      * Unit 배열 실행
+     *
+     * [Pure Generator Manifesto]
+     * - SlicedLoadUnit인 경우 → Executor.run() (자동 Time-Slicing)
+     * - 아닌 경우 → 경고 + 레거시 unit.load() (마이그레이션 유도)
      */
     private async executeUnits(units: LoadUnit[], options: ProtocolOptions): Promise<void> {
         const requiredUnits = units.filter((u) => u.requiredForReady);
@@ -258,27 +310,56 @@ export class LoadingProtocol {
             const displayName = 'getDisplayName' in unit
                 ? (unit as { getDisplayName(): string }).getDisplayName()
                 : unit.id;
-            const unitStartTime = performance.now();
 
             // Notify unit start (for forensic logging)
             options.onUnitStart?.(unit.id, displayName, unit.phase);
             options.onLog?.(`Loading: ${displayName}...`);
 
-            await unit.load(this.scene, (_unitProgress) => {
-                // Unit별 진행률을 전체 진행률에 반영
-                const overallProgress = this.registry.calculateProgress();
-                options.onProgress?.(overallProgress);
-            });
+            // [Pure Generator Manifesto] SlicedLoadUnit 체크
+            if (isSlicedLoadUnit(unit)) {
+                // ✅ SlicedLoadUnit: Executor로 실행
+                const result = await this.executeSlicedUnit(unit as SlicedLoadUnit, options);
 
-            const elapsedMs = performance.now() - unitStartTime;
-            const success = unit.status !== LoadUnitStatus.FAILED;
+                // 설계 실패 감지
+                if (result.designFailure) {
+                    this.designFailureUnits.push(unit.id);
+                }
 
-            // Notify unit end (for forensic logging)
-            options.onUnitEnd?.(unit.id, success, elapsedMs);
-            options.onUnitStatusChange?.(unit, unit.status);
+                if (!result.success) {
+                    throw unit.error || new Error(`Unit ${unit.id} failed`);
+                }
+            } else {
+                // ⚠️ Legacy LoadUnit: 경고 + 기존 방식
+                console.warn(
+                    `[LoadingProtocol] ⚠️ LEGACY UNIT: ${unit.id}\n` +
+                    `  This unit is NOT a SlicedLoadUnit.\n` +
+                    `  Migrate to AsyncGenerator pattern for The Pure Generator Manifesto.`
+                );
 
-            if (unit.status === LoadUnitStatus.FAILED) {
-                throw unit.error || new Error(`Unit ${unit.id} failed`);
+                const unitStartTime = performance.now();
+                await unit.load(this.scene, (_unitProgress) => {
+                    const overallProgress = this.registry.calculateProgress();
+                    options.onProgress?.(overallProgress);
+                });
+
+                const elapsedMs = performance.now() - unitStartTime;
+                const success = unit.status !== LoadUnitStatus.FAILED;
+
+                // 레거시 유닛의 blocking 체크
+                if (elapsedMs > 50) {
+                    console.error(
+                        `[LoadingProtocol] ❌ DESIGN FAILURE (Legacy): ${unit.id}\n` +
+                        `  Blocked for ${elapsedMs.toFixed(1)}ms (> 50ms threshold)`
+                    );
+                    this.designFailureUnits.push(unit.id);
+                }
+
+                options.onUnitEnd?.(unit.id, success, elapsedMs);
+                options.onUnitStatusChange?.(unit, unit.status);
+
+                if (unit.status === LoadUnitStatus.FAILED) {
+                    throw unit.error || new Error(`Unit ${unit.id} failed`);
+                }
             }
         }
 
@@ -289,24 +370,50 @@ export class LoadingProtocol {
                     const displayName = 'getDisplayName' in unit
                         ? (unit as { getDisplayName(): string }).getDisplayName()
                         : unit.id;
-                    const unitStartTime = performance.now();
 
                     options.onUnitStart?.(unit.id, displayName, unit.phase);
 
                     try {
-                        await unit.load(this.scene);
-                        const elapsedMs = performance.now() - unitStartTime;
-                        options.onUnitEnd?.(unit.id, true, elapsedMs);
+                        if (isSlicedLoadUnit(unit)) {
+                            await this.executeSlicedUnit(unit as SlicedLoadUnit, options);
+                        } else {
+                            await unit.load(this.scene);
+                        }
                         options.onUnitStatusChange?.(unit, unit.status);
                     } catch (err) {
                         console.warn(`[LoadingProtocol] Optional unit ${unit.id} failed:`, err);
                         unit.status = LoadUnitStatus.SKIPPED;
-                        const elapsedMs = performance.now() - unitStartTime;
-                        options.onUnitEnd?.(unit.id, false, elapsedMs);
                     }
                 })
             );
         }
+    }
+
+    /**
+     * SlicedLoadUnit 실행 (Executor 사용)
+     */
+    private async executeSlicedUnit(
+        unit: SlicedLoadUnit,
+        options: ProtocolOptions
+    ): Promise<ExecutionResult> {
+        const result = await this.executor.run(unit, this.scene, (_unitProgress) => {
+            const overallProgress = this.registry.calculateProgress();
+            options.onProgress?.(overallProgress);
+        });
+
+        // Notify unit end
+        options.onUnitEnd?.(unit.id, result.success, result.totalTime);
+        options.onUnitStatusChange?.(unit as unknown as LoadUnit, unit.status);
+
+        // 결과 로깅
+        if (result.success) {
+            console.log(
+                `[LoadingProtocol] ✅ ${unit.id}: ${result.totalTime.toFixed(1)}ms, ` +
+                `${result.yieldCount} yields, max block ${result.maxBlockingTime.toFixed(1)}ms`
+            );
+        }
+
+        return result;
     }
 
     /**
