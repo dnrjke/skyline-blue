@@ -191,3 +191,17 @@ export type {
 // ========================================
 export { MaterialWarmupHelper } from './warmup/MaterialWarmupHelper';
 export type { MaterialFactory, WarmupConfig } from './warmup/MaterialWarmupHelper';
+
+// ========================================
+// Asset Load Strategy (Phase 2.7 Option D Fallback)
+// ========================================
+export {
+    StandardAssetLoadStrategy,
+    getDefaultAssetLoadStrategy,
+    LARGE_ASSET_THRESHOLD_BYTES,
+    shouldUseLargeAssetStrategy,
+} from './strategy/AssetLoadStrategy';
+export type {
+    AssetLoadStrategy,
+    StreamingChunk,
+} from './strategy/AssetLoadStrategy';
