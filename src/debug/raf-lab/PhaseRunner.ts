@@ -1026,6 +1026,335 @@ export class PhaseRunner {
     }
 
     /**
+     * Run Black Hole Simulation phase
+     *
+     * This phase attempts to reproduce the exact conditions that cause
+     * RAF throttle in the real game:
+     *
+     * 1. TWO SCENES COEXIST - Host scene stays alive while Nav scene loads
+     * 2. COMPLEX GUI LAYERS - AdvancedDynamicTexture with multiple controls
+     * 3. GPU PULSE HOST - Burst rendering during loading
+     * 4. FULL LOADING SEQUENCE - GLB + TacticalGrid + Materials + Resize
+     */
+    async runBlackHoleSimulationPhase(modelPath: string): Promise<PhaseResult> {
+        const phaseName = 'Black Hole Simulation';
+        const startTime = performance.now();
+        const engine = this.scene.getEngine();
+
+        this.log(`[${phaseName}] ═══════════════════════════════════════`);
+        this.log(`[${phaseName}] ATTEMPTING TO REPRODUCE BLACK HOLE`);
+        this.log(`[${phaseName}] ═══════════════════════════════════════`);
+
+        // Measure RAF before
+        const rafBefore = await this.rafMeter.measure(this.scene, 20);
+
+        // Track throttle
+        let throttleDetected = false;
+        let throttleDetectedAtMs: number | null = null;
+        let maxBlockingMs = 0;
+
+        const stopMonitor = this.rafMeter.measureContinuous(
+            this.scene,
+            (interval, stats) => {
+                if (interval > maxBlockingMs) {
+                    maxBlockingMs = interval;
+                }
+                if (stats.isThrottled && !throttleDetected) {
+                    throttleDetected = true;
+                    throttleDetectedAtMs = performance.now() - startTime;
+                    this.log(`[${phaseName}] ⚠️ THROTTLE DETECTED at ${throttleDetectedAtMs.toFixed(0)}ms`);
+                }
+            },
+            5
+        );
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 1: Keep Host Scene alive (this.scene = "Host")
+        // ═══════════════════════════════════════════════════════════════
+        const hostScene = this.scene;
+        this.log(`[${phaseName}] Step 1: Host scene has ${hostScene.meshes.length} meshes`);
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 2: Create complex GUI on Host Scene (like ArcanaLoadingOverlay)
+        // ═══════════════════════════════════════════════════════════════
+        this.log(`[${phaseName}] Step 2: Creating AdvancedDynamicTexture + GUI layers...`);
+
+        const GUI = await import('@babylonjs/gui');
+        const guiTexture = GUI.AdvancedDynamicTexture.CreateFullscreenUI('BlackHoleGUI', true, hostScene);
+
+        // Create backdrop (like ArcanaLoadingOverlay)
+        const backdrop = new GUI.Rectangle('backdrop');
+        backdrop.width = '100%';
+        backdrop.height = '100%';
+        backdrop.thickness = 0;
+        backdrop.background = 'rgba(0, 0, 0, 0.92)';
+        backdrop.zIndex = 1100;
+        guiTexture.addControl(backdrop);
+
+        // Create multiple text blocks (simulate complex GUI)
+        const titleText = new GUI.TextBlock('title');
+        titleText.text = 'LOADING';
+        titleText.color = 'white';
+        titleText.fontSize = 46;
+        titleText.top = '-200px';
+        backdrop.addControl(titleText);
+
+        const subtitleText = new GUI.TextBlock('subtitle');
+        subtitleText.text = 'EP1 ST1';
+        subtitleText.color = '#888888';
+        subtitleText.fontSize = 22;
+        subtitleText.top = '-140px';
+        backdrop.addControl(subtitleText);
+
+        // Progress bar
+        const barOuter = new GUI.Rectangle('barOuter');
+        barOuter.width = '300px';
+        barOuter.height = '8px';
+        barOuter.thickness = 1;
+        barOuter.color = '#444444';
+        barOuter.top = '100px';
+        backdrop.addControl(barOuter);
+
+        const barFill = new GUI.Rectangle('barFill');
+        barFill.width = '0%';
+        barFill.height = '100%';
+        barFill.thickness = 0;
+        barFill.background = '#00aaff';
+        barFill.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+        barOuter.addControl(barFill);
+
+        // Debug text area
+        const debugText = new GUI.TextBlock('debug');
+        debugText.text = '';
+        debugText.color = '#666666';
+        debugText.fontSize = 12;
+        debugText.top = '200px';
+        debugText.height = '200px';
+        debugText.textWrapping = true;
+        backdrop.addControl(debugText);
+
+        await this.waitFrames(5);
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 3: Create Navigation Scene (SECOND SCENE - coexists with Host)
+        // ═══════════════════════════════════════════════════════════════
+        this.log(`[${phaseName}] Step 3: Creating Navigation Scene (TWO SCENES NOW EXIST)...`);
+
+        const navScene = new BABYLON.Scene(engine);
+        navScene.clearColor = new BABYLON.Color4(0.02, 0.05, 0.08, 1);
+
+        // Navigation camera
+        const navCamera = new BABYLON.ArcRotateCamera(
+            'navCamera',
+            Math.PI / 4,
+            Math.PI / 3,
+            30,
+            BABYLON.Vector3.Zero(),
+            navScene
+        );
+
+        // Light for nav scene
+        new BABYLON.HemisphericLight('navLight', new BABYLON.Vector3(0, 1, 0), navScene);
+
+        this.log(`[${phaseName}] TWO SCENES COEXIST: Host(${hostScene.meshes.length} meshes) + Nav(${navScene.meshes.length} meshes)`);
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 4: Activate GPU Pulse Host on Host Scene
+        // ═══════════════════════════════════════════════════════════════
+        this.log(`[${phaseName}] Step 4: Activating GPU Pulse Host...`);
+        const pulseHost = createPulseRenderHost(hostScene, false);
+        pulseHost.activate();
+
+        // Update progress
+        barFill.width = '10%';
+        debugText.text = 'GPU Pulse Host activated...';
+        await this.waitFrames(3);
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 5: Modify render loop to render BOTH scenes
+        // ═══════════════════════════════════════════════════════════════
+        this.log(`[${phaseName}] Step 5: Render loop now renders BOTH scenes...`);
+
+        engine.stopRenderLoop();
+        engine.runRenderLoop(() => {
+            // Host scene renders first (with GUI)
+            hostScene.render();
+            pulseHost.renderPulseFrame();
+
+            // Nav scene renders second (loading in background)
+            navScene.render();
+        });
+
+        await this.waitFrames(5);
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 6: Load GLB into Navigation Scene
+        // ═══════════════════════════════════════════════════════════════
+        this.log(`[${phaseName}] Step 6: Loading GLB into Navigation Scene...`);
+        barFill.width = '20%';
+        debugText.text = 'Loading character model...';
+
+        try {
+            const rootUrl = modelPath.substring(0, modelPath.lastIndexOf('/') + 1);
+            const fileName = modelPath.substring(modelPath.lastIndexOf('/') + 1);
+            await BABYLON.SceneLoader.ImportMeshAsync('', rootUrl, fileName, navScene);
+            this.log(`[${phaseName}] GLB loaded: ${navScene.meshes.length} meshes`);
+        } catch (e) {
+            this.log(`[${phaseName}] GLB load failed: ${e}`);
+        }
+
+        barFill.width = '40%';
+        await this.waitFrames(5);
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 7: Create TacticalGrid in Navigation Scene
+        // ═══════════════════════════════════════════════════════════════
+        this.log(`[${phaseName}] Step 7: Creating TacticalGrid in Navigation Scene...`);
+        barFill.width = '50%';
+        debugText.text = 'Creating tactical grid...';
+
+        const hologram = new TacticalHologram(navScene);
+        hologram.enable();
+        hologram.setVisibility(0); // Start invisible
+
+        await this.waitFrames(5);
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 8: Material Warmup on Navigation Scene
+        // ═══════════════════════════════════════════════════════════════
+        this.log(`[${phaseName}] Step 8: Material warmup on Navigation Scene...`);
+        barFill.width = '60%';
+        debugText.text = 'Compiling shaders...';
+
+        const materials = navScene.materials;
+        for (let i = 0; i < materials.length; i++) {
+            const mat = materials[i];
+            const tempMesh = BABYLON.MeshBuilder.CreateBox(`warmup-${i}`, { size: 0.001 }, navScene);
+            tempMesh.material = mat;
+            tempMesh.isVisible = false;
+            await this.waitFramesOnScene(navScene, 1);
+            tempMesh.dispose();
+        }
+
+        barFill.width = '70%';
+        await this.waitFrames(5);
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 9: Show TacticalGrid (visibility 0→1)
+        // ═══════════════════════════════════════════════════════════════
+        this.log(`[${phaseName}] Step 9: Animating TacticalGrid visibility 0→1...`);
+        barFill.width = '80%';
+        debugText.text = 'Activating tactical grid...';
+
+        // Animate visibility
+        const animDuration = 500; // ms
+        const animStart = performance.now();
+        await new Promise<void>((resolve) => {
+            const obs = navScene.onBeforeRenderObservable.add(() => {
+                const t = Math.min(1, (performance.now() - animStart) / animDuration);
+                hologram.setVisibility(t);
+                if (t >= 1) {
+                    navScene.onBeforeRenderObservable.remove(obs);
+                    resolve();
+                }
+            });
+        });
+
+        barFill.width = '85%';
+        await this.waitFrames(5);
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 10: Engine Resize (like finalizeNavigationReady)
+        // ═══════════════════════════════════════════════════════════════
+        this.log(`[${phaseName}] Step 10: Calling engine.resize()...`);
+        barFill.width = '90%';
+        debugText.text = 'Finalizing...';
+
+        engine.resize();
+        navScene.render();
+
+        await this.waitFrames(5);
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 11: Transfer - Stop Host, Switch to Nav only
+        // ═══════════════════════════════════════════════════════════════
+        this.log(`[${phaseName}] Step 11: Pulse Transfer - Switching to Navigation Scene only...`);
+        barFill.width = '95%';
+        debugText.text = 'Transferring control...';
+
+        // Deactivate pulse host
+        pulseHost.deactivate();
+
+        // Fade out GUI
+        let fadeAlpha = 1;
+        await new Promise<void>((resolve) => {
+            const fadeObs = hostScene.onBeforeRenderObservable.add(() => {
+                fadeAlpha -= 0.05;
+                backdrop.alpha = Math.max(0, fadeAlpha);
+                if (fadeAlpha <= 0) {
+                    hostScene.onBeforeRenderObservable.remove(fadeObs);
+                    resolve();
+                }
+            });
+        });
+
+        barFill.width = '100%';
+
+        // Switch render loop to Nav only
+        engine.stopRenderLoop();
+        engine.runRenderLoop(() => {
+            navScene.render();
+        });
+
+        // Attach camera control
+        navCamera.attachControl(engine.getRenderingCanvas()!, true);
+
+        await this.waitFramesOnScene(navScene, 10);
+
+        this.log(`[${phaseName}] Transfer complete - Navigation Scene active`);
+
+        // ═══════════════════════════════════════════════════════════════
+        // STEP 12: Cleanup and restore original scene
+        // ═══════════════════════════════════════════════════════════════
+        this.log(`[${phaseName}] Step 12: Cleanup and restore original scene...`);
+
+        stopMonitor();
+
+        // Measure RAF after (on nav scene)
+        const rafAfter = await this.rafMeter.measure(navScene, 20);
+
+        // Dispose nav scene and GUI
+        guiTexture.dispose();
+        navScene.dispose();
+        pulseHost.dispose();
+
+        // Restore original render loop
+        engine.stopRenderLoop();
+        engine.runRenderLoop(() => {
+            hostScene.render();
+        });
+
+        await this.waitFrames(5);
+        this.log(`[${phaseName}] Original scene restored`);
+
+        this.log(`[${phaseName}] ═══════════════════════════════════════`);
+        this.log(`[${phaseName}] BLACK HOLE SIMULATION COMPLETE`);
+        this.log(`[${phaseName}] Throttle detected: ${throttleDetected ? 'YES' : 'NO'}`);
+        this.log(`[${phaseName}] ═══════════════════════════════════════`);
+
+        return {
+            phaseName,
+            rafBefore,
+            rafAfter,
+            throttleDetected,
+            throttleDetectedAtMs,
+            maxBlockingMs,
+            elapsedMs: performance.now() - startTime,
+            error: throttleDetected ? null : 'Black hole NOT reproduced - throttle not detected',
+        };
+    }
+
+    /**
      * Wait for N frames on a specific scene
      */
     private waitFramesOnScene(scene: BABYLON.Scene, count: number): Promise<void> {

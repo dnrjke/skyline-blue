@@ -233,6 +233,14 @@ export class RAFLab {
         this.results.push(transferResult);
         this.logPhaseResult(transferResult);
 
+        // Phase 11: BLACK HOLE SIMULATION (comprehensive test)
+        this.labUI?.setPhase('Black Hole Simulation');
+        const blackHoleResult = await this.phaseRunner.runBlackHoleSimulationPhase(
+            TEST_MODEL_PATH
+        );
+        this.results.push(blackHoleResult);
+        this.logPhaseResult(blackHoleResult);
+
         // Generate diagnosis
         const diagnosis = this.generateDiagnosis();
         const throttleTrigger = this.findThrottleTrigger();
