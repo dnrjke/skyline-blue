@@ -24,6 +24,8 @@ const IS_DEV = typeof import.meta !== 'undefined' && (import.meta as any).env?.D
 // RAF Lab - Isolated debugging tool for RAF throttle issues
 // Usage: Add ?raf-lab to URL
 import { checkAndLaunchRAFLab } from '../debug/raf-lab/launcher';
+// Black Hole Debug Flags - Component isolation testing
+import { getBlackHoleDebugConfig, blackHoleDebugLog } from '../debug/BlackHoleDebugFlags';
 import { GUIManager } from '../shared/ui/GUIManager';
 import { BackgroundLayer } from '../shared/ui/BackgroundLayer';
 import { CharacterLayer } from '../shared/ui/CharacterLayer';
@@ -45,7 +47,7 @@ class Main {
     private canvas: HTMLCanvasElement;
     private engine: BABYLON.Engine;
     private scene: BABYLON.Scene;
-    private renderQuality: RenderQualityManager;
+    private renderQuality: RenderQualityManager | null = null;
     private loadingEngine: ArcanaLoadingEngine;
     private transitions: StageTransitionManager;
 
@@ -91,13 +93,19 @@ class Main {
         this.scene = this.createScene();
 
         // Phase 2.3: Visual integrity + performance tuning (분리된 매니저)
-        this.renderQuality = new RenderQualityManager(this.engine, this.scene, { minMsaaSamples: 4 });
-        this.renderQuality.init(this.scene.activeCamera!, this.canvas);
-        // Allow other systems (NavigationScene) to keep quality settings when swapping cameras.
-        this.scene.metadata = {
-            ...(this.scene.metadata as Record<string, unknown> | null),
-            renderQuality: this.renderQuality,
-        };
+        const debugConfig = getBlackHoleDebugConfig();
+        if (debugConfig.noQuality) {
+            blackHoleDebugLog('⚠️ RenderQualityManager DISABLED by debug flag');
+            this.renderQuality = null;
+        } else {
+            this.renderQuality = new RenderQualityManager(this.engine, this.scene, { minMsaaSamples: 4 });
+            this.renderQuality.init(this.scene.activeCamera!, this.canvas);
+            // Allow other systems (NavigationScene) to keep quality settings when swapping cameras.
+            this.scene.metadata = {
+                ...(this.scene.metadata as Record<string, unknown> | null),
+                renderQuality: this.renderQuality,
+            };
+        }
 
         // Initialize GUI system (HEBS layer hierarchy)
         this.guiManager = new GUIManager(this.scene);
@@ -224,7 +232,7 @@ class Main {
         this.bottomVignetteLayer.dispose();
         this.backgroundLayer.dispose();
         this.guiManager.dispose();
-        this.renderQuality.dispose();
+        this.renderQuality?.dispose();
         this.scene.dispose();
         this.engine.dispose();
     }
