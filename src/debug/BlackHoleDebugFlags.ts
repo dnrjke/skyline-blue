@@ -68,19 +68,30 @@ export interface BlackHoleDebugConfig {
 }
 
 let cachedConfig: BlackHoleDebugConfig | null = null;
+let cachedSearchString: string | null = null;
 
 /**
  * Parse URL parameters and return debug config
+ * Note: Cache is invalidated when URL search string changes (fixes HMR issues)
  */
 export function getBlackHoleDebugConfig(): BlackHoleDebugConfig {
-    if (cachedConfig) {
+    const currentSearch = window.location.search;
+
+    // Invalidate cache if URL changed (fixes Vite HMR caching issues)
+    if (cachedConfig && cachedSearchString === currentSearch) {
         return cachedConfig;
     }
 
-    const params = new URLSearchParams(window.location.search);
+    cachedSearchString = currentSearch;
+    const params = new URLSearchParams(currentSearch);
 
     const minimal = params.has('blackhole-minimal');
     const nuclear = params.has('blackhole-nuclear');
+
+    // Debug: Log raw URL parsing
+    const timelineFlag = params.has('blackhole-timeline');
+    console.log(`[BlackHoleDebug] URL: ${currentSearch}`);
+    console.log(`[BlackHoleDebug] timeline flag parsed: ${timelineFlag}`);
 
     cachedConfig = {
         debug: params.has('blackhole-debug'),
@@ -95,7 +106,7 @@ export function getBlackHoleDebugConfig(): BlackHoleDebugConfig {
         simpleGui: nuclear || params.has('blackhole-simple-gui'),
         minimalLayers: nuclear || params.has('blackhole-minimal-layers'),
         noADT: params.has('blackhole-no-adt'), // NOT included in nuclear (breaks game)
-        timeline: params.has('blackhole-timeline'),
+        timeline: timelineFlag,
         minimal,
         nuclear,
     };
