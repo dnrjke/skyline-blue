@@ -46,32 +46,104 @@ import { StageTransitionManager } from '../core/scene/StageTransitionManager';
 // Main Application
 // ============================================
 
+// ============================================
+// RAF Timeline Measurement (Black Hole Debug)
+// ============================================
+class RAFTimeline {
+    private enabled: boolean;
+    private markers: Array<{ name: string; time: number; rafDelta: number }> = [];
+    private lastRAF: number = 0;
+    private rafDeltas: number[] = [];
+    private frameObserver: (() => void) | null = null;
+
+    constructor(enabled: boolean) {
+        this.enabled = enabled;
+        if (enabled) {
+            console.log('');
+            console.log('╔══════════════════════════════════════════╗');
+            console.log('║     RAF TIMELINE MEASUREMENT ACTIVE      ║');
+            console.log('╠══════════════════════════════════════════╣');
+            console.log('║  Tracking RAF intervals at each step     ║');
+            console.log('╚══════════════════════════════════════════╝');
+            console.log('');
+        }
+    }
+
+    startTracking(scene: BABYLON.Scene): void {
+        if (!this.enabled) return;
+        this.lastRAF = performance.now();
+        this.frameObserver = () => {
+            const now = performance.now();
+            const delta = now - this.lastRAF;
+            this.rafDeltas.push(delta);
+            // Keep only last 30 deltas
+            if (this.rafDeltas.length > 30) this.rafDeltas.shift();
+            this.lastRAF = now;
+        };
+        scene.onAfterRenderObservable.add(this.frameObserver);
+    }
+
+    mark(name: string): void {
+        if (!this.enabled) return;
+        const avgDelta = this.rafDeltas.length > 0
+            ? this.rafDeltas.reduce((a, b) => a + b, 0) / this.rafDeltas.length
+            : 0;
+        this.markers.push({ name, time: performance.now(), rafDelta: avgDelta });
+
+        const status = avgDelta > 50 ? '🔴' : avgDelta > 25 ? '🟡' : '🟢';
+        console.log(`[RAFTimeline] ${status} ${name}: RAF avg=${avgDelta.toFixed(1)}ms`);
+    }
+
+    report(): void {
+        if (!this.enabled) return;
+        console.log('');
+        console.log('═══════════════════════════════════════════');
+        console.log('         RAF TIMELINE REPORT');
+        console.log('═══════════════════════════════════════════');
+        for (const marker of this.markers) {
+            const status = marker.rafDelta > 50 ? '🔴 THROTTLE' : marker.rafDelta > 25 ? '🟡 SLOW' : '🟢 OK';
+            console.log(`  ${marker.name.padEnd(30)} ${marker.rafDelta.toFixed(1).padStart(6)}ms  ${status}`);
+        }
+        console.log('═══════════════════════════════════════════');
+
+        // Find first throttle point
+        const throttlePoint = this.markers.find(m => m.rafDelta > 50);
+        if (throttlePoint) {
+            console.log(`⚠️ FIRST THROTTLE at: ${throttlePoint.name}`);
+        }
+        console.log('');
+    }
+}
+
 class Main {
     private canvas: HTMLCanvasElement;
     private engine: BABYLON.Engine;
     private scene: BABYLON.Scene;
     private renderQuality: RenderQualityManager | null = null;
-    private loadingEngine: ArcanaLoadingEngine;
-    private transitions: StageTransitionManager;
+    private loadingEngine: ArcanaLoadingEngine | null = null;
+    private transitions: StageTransitionManager | null = null;
 
     // UI Systems
-    private guiManager: GUIManager;
-    private backgroundLayer: BackgroundLayer;
-    private bottomVignetteLayer: BottomVignetteLayer;
-    private characterLayer: CharacterLayer;
+    private guiManager: GUIManager | null = null;
+    private backgroundLayer: BackgroundLayer | null = null;
+    private bottomVignetteLayer: BottomVignetteLayer | null = null;
+    private characterLayer: CharacterLayer | null = null;
 
     // Start Screens (Narrative Engine 외부)
-    private splashScene: SplashScene;
-    private touchToStartScene: TouchToStartScene;
+    private splashScene: SplashScene | null = null;
+    private touchToStartScene: TouchToStartScene | null = null;
 
     // Narrative Engine (대화 시스템)
-    private narrativeEngine: NarrativeEngine;
+    private narrativeEngine: NarrativeEngine | null = null;
 
     // Phase 2: Navigation Engine
-    private navigationEngine: NavigationEngine;
+    private navigationEngine: NavigationEngine | null = null;
 
     // Flow Controller (keeps Main thin)
-    private flow: FlowController;
+    private flow: FlowController | null = null;
+
+    // RAF Timeline (debug)
+    private timeline: RAFTimeline;
 
     constructor() {
         console.log('[System] ========================================');
@@ -79,11 +151,16 @@ class Main {
         console.log('[System] Phase 1.1 - Interactive Novel');
         console.log('[System] ========================================');
 
+        const debugConfig = getBlackHoleDebugConfig();
+        this.timeline = new RAFTimeline(debugConfig.timeline);
+
         // Get canvas (the ONLY HTML element we use)
         this.canvas = document.getElementById('renderCanvas') as HTMLCanvasElement;
         if (!this.canvas) {
             throw new Error('[System] Canvas element not found');
         }
+
+        this.timeline.mark('1. Canvas acquired');
 
         // Initialize Babylon.js Engine
         this.engine = new BABYLON.Engine(this.canvas, true, {
@@ -92,11 +169,22 @@ class Main {
             stencil: true,
         });
 
+        this.timeline.mark('2. Engine created');
+
         // Create scene
         this.scene = this.createScene();
 
+        this.timeline.mark('3. Scene created');
+
+        // Start render loop EARLY so timeline can measure
+        this.engine.runRenderLoop(() => {
+            this.scene.render();
+        });
+        this.timeline.startTracking(this.scene);
+
+        this.timeline.mark('4. RenderLoop started');
+
         // Phase 2.3: Visual integrity + performance tuning (분리된 매니저)
-        const debugConfig = getBlackHoleDebugConfig();
         if (debugConfig.noQuality) {
             blackHoleDebugLog('⚠️ RenderQualityManager DISABLED by debug flag');
             this.renderQuality = null;
@@ -110,12 +198,29 @@ class Main {
             };
         }
 
+        this.timeline.mark('5. RenderQualityManager');
+
+        // ========================================
+        // NO ADT MODE (Black Hole Debug)
+        // ========================================
+        if (debugConfig.noADT) {
+            blackHoleDebugLog('⚠️ GUIManager SKIPPED - NO ADT (diagnostic mode, game will not work)');
+            console.log('[System] NO ADT MODE: Skipping all GUI initialization');
+            this.timeline.mark('6. GUIManager SKIPPED (noADT)');
+            this.timeline.report();
+            return; // Early exit - game won't work but we can diagnose
+        }
+
         // Initialize GUI system (HEBS layer hierarchy)
         this.guiManager = new GUIManager(this.scene);
+
+        this.timeline.mark('6. GUIManager created');
 
         // Phase 2.5: shared loading engine lives in SkipLayer (transition UI)
         this.loadingEngine = new ArcanaLoadingEngine(this.guiManager.getSkipLayer(), { debugMode: true });
         this.transitions = new StageTransitionManager({ scene: this.scene, loading: this.loadingEngine });
+
+        this.timeline.mark('7. LoadingEngine/Transitions');
 
         // Initialize display components (DisplayLayer에 배치)
         this.backgroundLayer = new BackgroundLayer(this.guiManager.getDisplayLayer());
@@ -123,9 +228,13 @@ class Main {
         this.bottomVignetteLayer = new BottomVignetteLayer(this.guiManager.getDisplayLayer());
         this.characterLayer = new CharacterLayer(this.guiManager.getDisplayLayer());
 
+        this.timeline.mark('8. Display layers');
+
         // Initialize Start Screens (SkipLayer에 배치 - 최상위)
         this.splashScene = new SplashScene(this.guiManager.getSkipLayer());
         this.touchToStartScene = new TouchToStartScene(this.guiManager.getSkipLayer());
+
+        this.timeline.mark('9. Start screens');
 
         // Create Narrative Engine (나중에 활성화)
         this.narrativeEngine = new NarrativeEngine(
@@ -134,20 +243,21 @@ class Main {
             this.guiManager.getSkipLayer()
         );
 
+        this.timeline.mark('10. NarrativeEngine');
+
         // Phase 3 Navigation Engine (SystemLayer UI)
         this.navigationEngine = new NavigationEngine(this.scene, this.guiManager.getSystemLayer(), {
             energyBudget: 60,
             characterModelPath: '/assets/characters/pilot.glb',
         });
 
+        this.timeline.mark('11. NavigationEngine');
+
         // Resize/DPI handling is owned by RenderQualityManager (Phase 2.6)
 
-        // Start render loop
-        this.engine.runRenderLoop(() => {
-            this.scene.render();
-        });
-
         console.log('[System] Initialization complete');
+
+        this.timeline.mark('12. Init complete');
 
         // ========================================
         // Phase 2.5: DEV 모드 Babylon.js Inspector
@@ -170,6 +280,9 @@ class Main {
             transitions: this.transitions,
         });
         this.flow.start();
+
+        this.timeline.mark('13. FlowController started');
+        this.timeline.report();
     }
 
     private createScene(): BABYLON.Scene {
@@ -226,15 +339,15 @@ class Main {
     // ============================================
 
     dispose(): void {
-        this.flow.dispose();
-        this.navigationEngine.dispose();
-        this.narrativeEngine.dispose();
-        this.touchToStartScene.dispose();
-        this.splashScene.dispose();
-        this.characterLayer.dispose();
-        this.bottomVignetteLayer.dispose();
-        this.backgroundLayer.dispose();
-        this.guiManager.dispose();
+        this.flow?.dispose();
+        this.navigationEngine?.dispose();
+        this.narrativeEngine?.dispose();
+        this.touchToStartScene?.dispose();
+        this.splashScene?.dispose();
+        this.characterLayer?.dispose();
+        this.bottomVignetteLayer?.dispose();
+        this.backgroundLayer?.dispose();
+        this.guiManager?.dispose();
         this.renderQuality?.dispose();
         this.scene.dispose();
         this.engine.dispose();

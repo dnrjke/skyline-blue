@@ -33,6 +33,7 @@ export class GUIManager {
     private rootScaler: GUI.Rectangle; // Phase 2.6: Root Scaling Container
     private initialScaleApplied: boolean = false;
     private simpleGuiMode: boolean = false;
+    private minimalLayersMode: boolean = false;
 
     // Layer containers (HEBS 계층 구조)
     private interactionLayer: GUI.Rectangle;
@@ -44,13 +45,14 @@ export class GUIManager {
     constructor(scene: BABYLON.Scene) {
         const debugConfig = getBlackHoleDebugConfig();
         this.simpleGuiMode = debugConfig.simpleGui;
+        this.minimalLayersMode = debugConfig.minimalLayers;
 
         this.texture = GUI.AdvancedDynamicTexture.CreateFullscreenUI('MainUI', true, scene);
 
         // ========================================
         // Simple GUI Mode (Black Hole Debug)
         // ========================================
-        if (this.simpleGuiMode) {
+        if (this.simpleGuiMode || this.minimalLayersMode) {
             blackHoleDebugLog('⚠️ GUIManager SIMPLE MODE - adaptive scaling DISABLED');
 
             // Use default renderAtIdealSize (true) for simplicity
@@ -91,30 +93,51 @@ export class GUIManager {
             this.texture.addControl(this.rootScaler);
         }
 
-        // Create layers in zIndex order (INTERACTION first as per arcana_ui_rules.md)
-        // HEBS §1.3: InteractionLayer는 ADT 내에서 가장 먼저 생성되어야 한다
-        this.interactionLayer = this.createLayer('InteractionLayer', Z_INDEX.INTERACTION);
-        this.displayLayer = this.createLayer('DisplayLayer', Z_INDEX.DISPLAY);
-        this.effectLayer = this.createLayer('EffectLayer', Z_INDEX.EFFECT);
-        this.systemLayer = this.createLayer('SystemLayer', Z_INDEX.SYSTEM);
-        this.skipLayer = this.createLayer('SkipLayer', Z_INDEX.SKIP);
+        // ========================================
+        // Minimal Layers Mode (Black Hole Debug)
+        // ========================================
+        if (this.minimalLayersMode) {
+            blackHoleDebugLog('⚠️ GUIManager MINIMAL LAYERS - only 1 unified layer');
 
-        // HEBS §1.1: 모든 상위 레이어는 클릭 관통 (isHitTestVisible = false)
-        // InteractionLayer만 입력을 소비함
-        this.displayLayer.isHitTestVisible = false;
-        this.effectLayer.isHitTestVisible = false;
-        this.systemLayer.isHitTestVisible = false;
-        // SkipLayer는 "시스템 버튼" 전용 레이어로 사용 가능:
-        // - 기본은 클릭 관통(컨트롤이 없을 때)
-        // - Skip/Auto 등 컨트롤이 추가되면 해당 컨트롤이 isPointerBlocker=true로 입력을 소비
-        this.skipLayer.isHitTestVisible = true;
-        // 핵심: SkipLayer는 전체 화면 컨테이너이므로, 컨테이너 자체가 피킹되면
-        // InteractionLayer의 clickArea까지 이벤트가 내려가지 않을 수 있다.
-        // Babylon GUI 규칙에 따라 "자식에게만 피킹 위임"하여 버튼 영역만 히트 테스트 되게 한다.
-        this.skipLayer.delegatePickingToChildren = true;
+            // Create only 1 unified layer (all getters return this same layer)
+            const unifiedLayer = this.createLayer('UnifiedLayer', Z_INDEX.SKIP);
+            unifiedLayer.isHitTestVisible = true;
+            unifiedLayer.delegatePickingToChildren = true;
 
-        // Apply scale policy ONLY in normal mode
-        if (!this.simpleGuiMode) {
+            // All layers point to the same unified layer
+            this.interactionLayer = unifiedLayer;
+            this.displayLayer = unifiedLayer;
+            this.effectLayer = unifiedLayer;
+            this.systemLayer = unifiedLayer;
+            this.skipLayer = unifiedLayer;
+
+            console.log('[GUIManager] MINIMAL LAYERS MODE: 1 unified layer instead of 5');
+        } else {
+            // Create layers in zIndex order (INTERACTION first as per arcana_ui_rules.md)
+            // HEBS §1.3: InteractionLayer는 ADT 내에서 가장 먼저 생성되어야 한다
+            this.interactionLayer = this.createLayer('InteractionLayer', Z_INDEX.INTERACTION);
+            this.displayLayer = this.createLayer('DisplayLayer', Z_INDEX.DISPLAY);
+            this.effectLayer = this.createLayer('EffectLayer', Z_INDEX.EFFECT);
+            this.systemLayer = this.createLayer('SystemLayer', Z_INDEX.SYSTEM);
+            this.skipLayer = this.createLayer('SkipLayer', Z_INDEX.SKIP);
+
+            // HEBS §1.1: 모든 상위 레이어는 클릭 관통 (isHitTestVisible = false)
+            // InteractionLayer만 입력을 소비함
+            this.displayLayer.isHitTestVisible = false;
+            this.effectLayer.isHitTestVisible = false;
+            this.systemLayer.isHitTestVisible = false;
+            // SkipLayer는 "시스템 버튼" 전용 레이어로 사용 가능:
+            // - 기본은 클릭 관통(컨트롤이 없을 때)
+            // - Skip/Auto 등 컨트롤이 추가되면 해당 컨트롤이 isPointerBlocker=true로 입력을 소비
+            this.skipLayer.isHitTestVisible = true;
+            // 핵심: SkipLayer는 전체 화면 컨테이너이므로, 컨테이너 자체가 피킹되면
+            // InteractionLayer의 clickArea까지 이벤트가 내려가지 않을 수 있다.
+            // Babylon GUI 규칙에 따라 "자식에게만 피킹 위임"하여 버튼 영역만 히트 테스트 되게 한다.
+            this.skipLayer.delegatePickingToChildren = true;
+        }
+
+        // Apply scale policy ONLY in normal mode (not simple/minimal)
+        if (!this.simpleGuiMode && !this.minimalLayersMode) {
             // Apply scale policy AFTER RootScaler/layers are created.
             // Also re-apply on engine resize. (RenderQualityManager may resize asynchronously via ResizeObserver.)
             const engine = scene.getEngine();

@@ -14,6 +14,9 @@
  *   ?blackhole-no-barrier               - Disable ENGINE_AWAKENED barrier
  *   ?blackhole-no-visualready           - Disable VISUAL_READY check
  *   ?blackhole-simple-gui               - Disable GUIManager adaptive scaling (rootScaler, resize, executeWhenReady)
+ *   ?blackhole-minimal-layers           - GUIManager creates only 1 layer instead of 5
+ *   ?blackhole-no-adt                   - Skip GUIManager entirely (no ADT, diagnostic only)
+ *   ?blackhole-timeline                 - Enable RAF timeline measurement in Main.ts
  *   ?blackhole-minimal                  - Disable: pulse, barrier, visualready
  *   ?blackhole-nuclear                  - Disable ALL optional components (wide net)
  *
@@ -48,6 +51,15 @@ export interface BlackHoleDebugConfig {
     /** Disable GUIManager adaptive scaling (rootScaler, resize, executeWhenReady) */
     simpleGui: boolean;
 
+    /** GUIManager creates only 1 layer instead of 5 */
+    minimalLayers: boolean;
+
+    /** Skip GUIManager entirely (no ADT, diagnostic only - game won't work) */
+    noADT: boolean;
+
+    /** Enable RAF timeline measurement in Main.ts */
+    timeline: boolean;
+
     /** Minimal mode - disable: pulse, barrier, visualready */
     minimal: boolean;
 
@@ -81,6 +93,9 @@ export function getBlackHoleDebugConfig(): BlackHoleDebugConfig {
         noBarrier: nuclear || minimal || params.has('blackhole-no-barrier'),
         noVisualReady: nuclear || minimal || params.has('blackhole-no-visualready'),
         simpleGui: nuclear || params.has('blackhole-simple-gui'),
+        minimalLayers: nuclear || params.has('blackhole-minimal-layers'),
+        noADT: params.has('blackhole-no-adt'), // NOT included in nuclear (breaks game)
+        timeline: params.has('blackhole-timeline'),
         minimal,
         nuclear,
     };
@@ -105,6 +120,9 @@ export function getBlackHoleDebugConfig(): BlackHoleDebugConfig {
         if (cachedConfig.noBarrier) console.log('║    ✗ ENGINE_AWAKENED barrier             ║');
         if (cachedConfig.noVisualReady) console.log('║    ✗ VISUAL_READY check                  ║');
         if (cachedConfig.simpleGui) console.log('║    ✗ GUIManager adaptive scaling         ║');
+        if (cachedConfig.minimalLayers) console.log('║    ✗ GUI layers (1 instead of 5)         ║');
+        if (cachedConfig.noADT) console.log('║    ✗ AdvancedDynamicTexture (NO GUI!)    ║');
+        if (cachedConfig.timeline) console.log('║    ✓ RAF timeline measurement            ║');
         console.log('╚══════════════════════════════════════════╝');
         console.log('');
     }
