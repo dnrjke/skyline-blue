@@ -17,6 +17,7 @@
  *   ?blackhole-minimal-layers           - GUIManager creates only 1 layer instead of 5
  *   ?blackhole-no-adt                   - Skip GUIManager entirely (no ADT, diagnostic only)
  *   ?blackhole-timeline                 - Enable RAF timeline measurement in Main.ts
+ *   ?blackhole-visual-freshness         - Enable Post-Load Visual Freshness keeper (camera breath)
  *   ?blackhole-minimal                  - Disable: pulse, barrier, visualready
  *   ?blackhole-nuclear                  - Disable ALL optional components (wide net)
  *
@@ -59,6 +60,9 @@ export interface BlackHoleDebugConfig {
 
     /** Enable RAF timeline measurement in Main.ts */
     timeline: boolean;
+
+    /** Enable Post-Load Visual Freshness keeper (camera breath to prevent stale-page throttle) */
+    visualFreshness: boolean;
 
     /** Minimal mode - disable: pulse, barrier, visualready */
     minimal: boolean;
@@ -107,6 +111,7 @@ export function getBlackHoleDebugConfig(): BlackHoleDebugConfig {
         minimalLayers: nuclear || params.has('blackhole-minimal-layers'),
         noADT: params.has('blackhole-no-adt'), // NOT included in nuclear (breaks game)
         timeline: timelineFlag,
+        visualFreshness: params.has('blackhole-visual-freshness'),
         minimal,
         nuclear,
     };
@@ -134,6 +139,7 @@ export function getBlackHoleDebugConfig(): BlackHoleDebugConfig {
         if (cachedConfig.minimalLayers) console.log('║    ✗ GUI layers (1 instead of 5)         ║');
         if (cachedConfig.noADT) console.log('║    ✗ AdvancedDynamicTexture (NO GUI!)    ║');
         if (cachedConfig.timeline) console.log('║    ✓ RAF timeline measurement            ║');
+        if (cachedConfig.visualFreshness) console.log('║    ✓ Visual Freshness keeper (breath)    ║');
         console.log('╚══════════════════════════════════════════╝');
         console.log('');
     }

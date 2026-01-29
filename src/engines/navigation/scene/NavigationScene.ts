@@ -51,6 +51,7 @@ import { BlackHoleForensicProbe } from '../debug/BlackHoleForensicProbe';
 import { getBlackHoleDebugConfig, blackHoleDebugLog } from '../../../debug/BlackHoleDebugFlags';
 import { PhysicalReadyCaptureProbe } from '../debug/PhysicalReadyCaptureProbe';
 import { PhysicalReadyFlightRecorderProbe } from '../debug/PhysicalReadyFlightRecorderProbe';
+import { VisualFreshnessKeeper } from '../../../debug/VisualFreshnessKeeper';
 
 // Phase 2.6: GPU Pulse Host System
 import {
@@ -131,6 +132,7 @@ export class NavigationScene {
 
     // Active Engagement Strategy (🅰️+): Rendering Intent Keeper
     private intentKeeper: RenderingIntentKeeper | null = null;
+    private visualFreshnessKeeper: VisualFreshnessKeeper | null = null;
 
     // Phase 2.6: GPU Pulse Host System
     private gpuPulseSystem: GPUPulseSystem | null = null;
@@ -623,6 +625,26 @@ export class NavigationScene {
                 // maintain active GPU scheduling.
                 this.intentKeeper = new RenderingIntentKeeper(this.scene, { debug: false });
                 this.intentKeeper.start();
+
+                // ===== VISUAL FRESHNESS KEEPER (Black Hole Debug) =====
+                // If ?blackhole-visual-freshness is set, start camera breath animation
+                // to test if "visual freshness" prevents Chrome's stale-page throttle.
+                // Hypothesis: Chrome throttles RAF when it detects "visual staleness".
+                // This keeper maintains subtle camera oscillation to signal "live content".
+                if (debugConfig.visualFreshness) {
+                    console.log('[VisualFreshness] Starting Post-Load Live Phase...');
+                    this.visualFreshnessKeeper = new VisualFreshnessKeeper(
+                        this.scene,
+                        this.scene.activeCamera,
+                        {
+                            cameraBreath: true,
+                            cameraBreathAmplitude: 0.015, // Very subtle
+                            cameraBreathPeriod: 4000,     // 4 second "breath" cycle
+                            debug: true,
+                        }
+                    );
+                    this.visualFreshnessKeeper.start();
+                }
 
                 // ===== GPU PULSE TRANSFER (Phase 2.6) =====
                 // Transfer pulse ownership from Loading Host to Game Scene.
@@ -1141,6 +1163,10 @@ export class NavigationScene {
         // Active Engagement: Dispose intent keeper
         this.intentKeeper?.dispose();
         this.intentKeeper = null;
+
+        // Visual Freshness Keeper: Stop and cleanup (debug)
+        this.visualFreshnessKeeper?.stop();
+        this.visualFreshnessKeeper = null;
 
         // GPU Pulse System: End pulse and dispose
         this.gpuPulseSystem?.endPulse();
