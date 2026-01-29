@@ -26,11 +26,13 @@
 import * as BABYLON from '@babylonjs/core';
 import * as GUI from '@babylonjs/gui';
 import { Z_INDEX, LAYOUT } from '../design';
+import { getBlackHoleDebugConfig, blackHoleDebugLog } from '../../debug/BlackHoleDebugFlags';
 
 export class GUIManager {
     private texture: GUI.AdvancedDynamicTexture;
     private rootScaler: GUI.Rectangle; // Phase 2.6: Root Scaling Container
     private initialScaleApplied: boolean = false;
+    private simpleGuiMode: boolean = false;
 
     // Layer containers (HEBS 계층 구조)
     private interactionLayer: GUI.Rectangle;
@@ -40,30 +42,54 @@ export class GUIManager {
     private skipLayer: GUI.Rectangle;
 
     constructor(scene: BABYLON.Scene) {
+        const debugConfig = getBlackHoleDebugConfig();
+        this.simpleGuiMode = debugConfig.simpleGui;
+
         this.texture = GUI.AdvancedDynamicTexture.CreateFullscreenUI('MainUI', true, scene);
 
         // ========================================
-        // Phase 2.6: Native Resolution UI (Crisp Text)
+        // Simple GUI Mode (Black Hole Debug)
         // ========================================
-        // 기존 'renderAtIdealSize = true'는 고해상도(DPI 3)에서도 
-        // 텍스처를 저해상도(Logical Size)로 생성하여 흐릿함을 유발함.
-        // 따라서 이를 비활성화하고, Root Container의 Scale을 수동으로 조절하여
-        // "물리 픽셀 1:1 텍스처 + 논리적 좌표계 유지"를 달성한다.
-        this.texture.renderAtIdealSize = false; 
+        if (this.simpleGuiMode) {
+            blackHoleDebugLog('⚠️ GUIManager SIMPLE MODE - adaptive scaling DISABLED');
 
-        console.log('[GUIManager] Initialized with Native Resolution UI');
-        console.log('[GUIManager] renderAtIdealSize=', this.texture.renderAtIdealSize);
+            // Use default renderAtIdealSize (true) for simplicity
+            this.texture.renderAtIdealSize = true;
+            this.texture.idealWidth = LAYOUT.IDEAL_WIDTH;
 
-        // Phase 2.6: Create Root Scaler
-        // This container scales the entire UI to match logical 1080p design,
-        // while the underlying texture remains at native resolution.
-        this.rootScaler = new GUI.Rectangle('RootScaler');
-        this.rootScaler.thickness = 0;
-        this.rootScaler.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
-        this.rootScaler.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_CENTER;
-        // Prevent "wrong-first-frame" flash: keep hidden until a valid scale is applied
-        this.rootScaler.alpha = 0;
-        this.texture.addControl(this.rootScaler);
+            // Create simple root container (no scaling)
+            this.rootScaler = new GUI.Rectangle('RootScaler');
+            this.rootScaler.thickness = 0;
+            this.rootScaler.width = '100%';
+            this.rootScaler.height = '100%';
+            this.rootScaler.alpha = 1; // Immediately visible
+            this.texture.addControl(this.rootScaler);
+
+            console.log('[GUIManager] SIMPLE MODE: No adaptive scaling, no resize observers');
+        } else {
+            // ========================================
+            // Phase 2.6: Native Resolution UI (Crisp Text)
+            // ========================================
+            // 기존 'renderAtIdealSize = true'는 고해상도(DPI 3)에서도
+            // 텍스처를 저해상도(Logical Size)로 생성하여 흐릿함을 유발함.
+            // 따라서 이를 비활성화하고, Root Container의 Scale을 수동으로 조절하여
+            // "물리 픽셀 1:1 텍스처 + 논리적 좌표계 유지"를 달성한다.
+            this.texture.renderAtIdealSize = false;
+
+            console.log('[GUIManager] Initialized with Native Resolution UI');
+            console.log('[GUIManager] renderAtIdealSize=', this.texture.renderAtIdealSize);
+
+            // Phase 2.6: Create Root Scaler
+            // This container scales the entire UI to match logical 1080p design,
+            // while the underlying texture remains at native resolution.
+            this.rootScaler = new GUI.Rectangle('RootScaler');
+            this.rootScaler.thickness = 0;
+            this.rootScaler.horizontalAlignment = GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+            this.rootScaler.verticalAlignment = GUI.Control.VERTICAL_ALIGNMENT_CENTER;
+            // Prevent "wrong-first-frame" flash: keep hidden until a valid scale is applied
+            this.rootScaler.alpha = 0;
+            this.texture.addControl(this.rootScaler);
+        }
 
         // Create layers in zIndex order (INTERACTION first as per arcana_ui_rules.md)
         // HEBS §1.3: InteractionLayer는 ADT 내에서 가장 먼저 생성되어야 한다
@@ -87,18 +113,21 @@ export class GUIManager {
         // Babylon GUI 규칙에 따라 "자식에게만 피킹 위임"하여 버튼 영역만 히트 테스트 되게 한다.
         this.skipLayer.delegatePickingToChildren = true;
 
-        // Apply scale policy AFTER RootScaler/layers are created.
-        // Also re-apply on engine resize. (RenderQualityManager may resize asynchronously via ResizeObserver.)
-        const engine = scene.getEngine();
-        engine.onResizeObservable.add(() => {
+        // Apply scale policy ONLY in normal mode
+        if (!this.simpleGuiMode) {
+            // Apply scale policy AFTER RootScaler/layers are created.
+            // Also re-apply on engine resize. (RenderQualityManager may resize asynchronously via ResizeObserver.)
+            const engine = scene.getEngine();
+            engine.onResizeObservable.add(() => {
+                this.applyAdaptiveScaling(engine);
+            });
             this.applyAdaptiveScaling(engine);
-        });
-        this.applyAdaptiveScaling(engine);
 
-        // Late-bind scaling to ensure initial viewport/layout has settled
-        scene.executeWhenReady(() => {
-            this.applyAdaptiveScaling(engine);
-        });
+            // Late-bind scaling to ensure initial viewport/layout has settled
+            scene.executeWhenReady(() => {
+                this.applyAdaptiveScaling(engine);
+            });
+        }
 
         console.log('[GUIManager] HEBS layer hierarchy created');
     }

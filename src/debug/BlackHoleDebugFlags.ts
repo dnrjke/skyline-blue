@@ -13,6 +13,7 @@
  *   ?blackhole-no-warmup                - Disable material warmup
  *   ?blackhole-no-barrier               - Disable ENGINE_AWAKENED barrier
  *   ?blackhole-no-visualready           - Disable VISUAL_READY check
+ *   ?blackhole-simple-gui               - Disable GUIManager adaptive scaling (rootScaler, resize, executeWhenReady)
  *   ?blackhole-minimal                  - Disable: pulse, barrier, visualready
  *   ?blackhole-nuclear                  - Disable ALL optional components (wide net)
  *
@@ -43,6 +44,9 @@ export interface BlackHoleDebugConfig {
 
     /** Disable VISUAL_READY check (pass immediately) */
     noVisualReady: boolean;
+
+    /** Disable GUIManager adaptive scaling (rootScaler, resize, executeWhenReady) */
+    simpleGui: boolean;
 
     /** Minimal mode - disable: pulse, barrier, visualready */
     minimal: boolean;
@@ -76,6 +80,7 @@ export function getBlackHoleDebugConfig(): BlackHoleDebugConfig {
         noWarmup: nuclear || params.has('blackhole-no-warmup'),
         noBarrier: nuclear || minimal || params.has('blackhole-no-barrier'),
         noVisualReady: nuclear || minimal || params.has('blackhole-no-visualready'),
+        simpleGui: nuclear || params.has('blackhole-simple-gui'),
         minimal,
         nuclear,
     };
@@ -99,6 +104,7 @@ export function getBlackHoleDebugConfig(): BlackHoleDebugConfig {
         if (cachedConfig.noWarmup) console.log('║    ✗ Material warmup                     ║');
         if (cachedConfig.noBarrier) console.log('║    ✗ ENGINE_AWAKENED barrier             ║');
         if (cachedConfig.noVisualReady) console.log('║    ✗ VISUAL_READY check                  ║');
+        if (cachedConfig.simpleGui) console.log('║    ✗ GUIManager adaptive scaling         ║');
         console.log('╚══════════════════════════════════════════╝');
         console.log('');
     }
