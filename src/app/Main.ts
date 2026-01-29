@@ -29,6 +29,8 @@ import { checkAndLaunchRAFLab } from '../debug/raf-lab/launcher';
 import { checkAndLaunchTransitionLab } from '../debug/transition-lab/launcher';
 // Black Hole Debug Flags - Component isolation testing
 import { getBlackHoleDebugConfig, blackHoleDebugLog } from '../debug/BlackHoleDebugFlags';
+// Visibility Monitor - Track tab visibility state changes (Black Hole investigation)
+import { VisibilityMonitor } from '../debug/VisibilityMonitor';
 import { GUIManager } from '../shared/ui/GUIManager';
 import { BackgroundLayer } from '../shared/ui/BackgroundLayer';
 import { CharacterLayer } from '../shared/ui/CharacterLayer';
@@ -356,6 +358,13 @@ class Main {
 
 // Initialize on DOM ready
 window.addEventListener('DOMContentLoaded', async () => {
+    // Black Hole Investigation: Install visibility monitor FIRST
+    // This must be before any engine initialization to catch early visibility changes
+    const debugConfig = getBlackHoleDebugConfig();
+    if (debugConfig.debug || debugConfig.timeline) {
+        VisibilityMonitor.install();
+    }
+
     const canvas = document.getElementById('renderCanvas') as HTMLCanvasElement;
 
     // Check for debug lab modes first (they bypass normal game flow)
